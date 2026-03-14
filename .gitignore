@@ -3,4 +3,4 @@ build/
 3rdparty/
 *.pyc
 *.so
-*.jsonl
+*.jsonlarchive/
