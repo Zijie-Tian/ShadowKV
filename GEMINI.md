@@ -65,11 +65,11 @@ python setup.py build_ext --inplace
 
 ### Running Tests
 **Accuracy Evaluation (RULER Benchmark)**:
-Requires multi-GPU (up to 8xA100 as per README).
+**必须**使用 `scripts/run_ruler.sh` 启动 RULER 精度测试，**禁止**直接调用 `test/eval_acc.py`。详见 [`docs/run_ruler.md`](docs/run_ruler.md)。
 ```bash
-OMP_NUM_THREADS=48 torchrun --standalone --nnodes=1 --nproc_per_node 8 test/eval_acc.py \
-  --datalen 131072 --method shadowkv \
-  --dataset_name "ruler/niah_single_1" --sparse_budget 2048 --rank 160 --chunk_size 8
+bash scripts/run_ruler.sh \
+  --model /home/zijie/models/Llama-3.1-8B-Instruct \
+  --gpus 0,1 --method full --num_samples 10
 ```
 
 **Efficiency/Throughput Evaluation**:
@@ -90,3 +90,23 @@ python test/e2e.py --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" --datale
 ## ⚙️ 6. Environment Execution Rules
 - **Strict Conda Environment**: You **MUST ALWAYS** use the `shadowkv` conda environment when executing any Python scripts or running terminal commands within this repository. 
 - **Execution Format**: Ensure the environment is active before execution. For example, use `conda run -n shadowkv python <script.py>` or chain the activation like `source ~/anaconda3/etc/profile.d/conda.sh && conda activate shadowkv && python <script.py>`. Do not use the base environment.
+
+## 📝 7. Documentation Management Rules
+- **Two-Tier Structure**: All technical documentation follows a two-tier structure:
+  1. **`GEMINI.md`（本文件）**: 存放 **摘要引用**（Reference & Summary）。每篇文档在下方 Section 8 中以一行简述 + 链接的形式索引。
+  2. **`docs/*.md`**: 存放 **详细技术描述**。每个主题一个 `.md` 文件，包含完整的代码分析、数据流、架构图等。
+- **新增文档流程**:
+  1. 在 `docs/` 下创建新的 `.md` 文件，撰写详细内容。
+  2. 在本文件 Section 8 中添加对应的引用条目（标题 + 一句话总结 + 相对路径链接）。
+- **命名规范**: `docs/` 下的文件使用 `snake_case.md` 命名，名称应简洁且具有描述性。
+- **更新规则**: 当代码发生重大变更时，同步更新对应的 `docs/` 文档和本文件中的引用。
+
+---
+
+## 📚 8. Documentation References
+
+| 主题 | 文档路径 | 摘要 |
+|------|----------|------|
+| KV Cache Offload & Load | [`docs/kv_cache_offload_load.md`](docs/kv_cache_offload_load.md) | 详述 Prefill 阶段的 V cache CPU offload、K cache SVD 压缩，以及 Decode 阶段的稀疏 Value 加载（`gather_copy_with_offsets`）和 Key 在线重建（CUTLASS GEMM + RoPE）的完整流程与 buffer 布局。 |
+| K Cache 低秩分解 | [`docs/k_cache_low_rank_decomposition.md`](docs/k_cache_low_rank_decomposition.md) | 详述 Pre-RoPE Key 的 SVD 压缩原理（rank=160）、`ShadowKVCache` vs `ShadowKVCache_CPU` 的 U/SV 存储布局差异、CUTLASS `GemmUniversalBatchGatherIndices` kernel 的 Gather-GEMM-RoPE fused 重建流程，以及 6.4× 压缩比的存储分析。 |
+| RULER Benchmark 测试 | [`docs/run_ruler.md`](docs/run_ruler.md) | `scripts/run_ruler.sh` 多 GPU 并行 RULER 精度测试脚本的使用指南，包括参数说明、可用任务列表、支持的模型、输出格式及常见用法。**所有 RULER 测试必须通过此脚本启动。** |

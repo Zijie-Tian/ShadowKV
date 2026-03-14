@@ -3,4 +3,8 @@ build/
 3rdparty/
 *.pyc
 *.so
-*.jsonlarchive/
+*.jsonl
+
+archive/
+data/ruler/data/
+data/niah/data/
