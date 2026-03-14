@@ -116,6 +116,10 @@ class Llama(LLM):
             self.ctx_template = Templates['yi']
             self.chat_template = Chat_Templates['yi']
             self.prefix_template = Prefix_Templates['yi']
+        elif 'llama-2' in model_name.lower():
+            self.ctx_template = Templates['base']
+            self.chat_template = Chat_Templates['base']
+            self.prefix_template = Prefix_Templates['base']
         else:
             raise ValueError(f"Invalid model name {model_name}")
 

@@ -16,7 +16,9 @@
 ################################################################################
 
 from datasets import load_dataset
-from termcolor import colored
+def colored(text, color):
+    colors = {'red': '\033[91m', 'green': '\033[92m', 'yellow': '\033[93m', 'blue': '\033[94m', 'cyan': '\033[96m'}
+    return f"{colors.get(color, '')}{text}\033[0m"
 import random
 import numpy as np
 
@@ -128,7 +130,7 @@ class Dataset:
     def get_dataset(self):
         if 'ruler' in self.dataset_name: # ruler/xxx
             task = self.dataset_name.split('/')[-1]
-            assert self.datalen in [8*1024, 16*1024, 32*1024, 64*1024, 128*1024, 256*1024], "Only support datalen of 16k, 32k, 64k, 128k"
+            assert self.datalen in [4*1024, 8*1024, 16*1024, 32*1024, 64*1024, 128*1024, 256*1024], "Only support datalen of 4k, 8k, 16k, 32k, 64k, 128k"
 
             if 'llama-3' in self.tokenizer.name_or_path.lower():
                 model_dir = 'llama-3'
@@ -142,6 +144,8 @@ class Dataset:
                 model_dir = 'qwen'
             elif 'phi' in self.tokenizer.name_or_path.lower():
                 model_dir = 'phi'
+            elif 'llama-2' in self.tokenizer.name_or_path.lower():
+                model_dir = 'llama-2'
             else:
                 raise Exception("Model not found", self.tokenizer.name_or_path)
 

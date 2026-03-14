@@ -27,7 +27,9 @@ warnings.filterwarnings("ignore")
 
 import torch
 import gc
-from termcolor import colored
+def colored(text, color):
+    colors = {'red': '\033[91m', 'green': '\033[92m', 'yellow': '\033[93m', 'blue': '\033[94m', 'cyan': '\033[96m'}
+    return f"{colors.get(color, '')}{text}\033[0m"
 from argparse import ArgumentParser, Namespace
 
 import torch.distributed as dist

@@ -126,7 +126,7 @@ class LLM:
 
         elif isinstance(self.kv_cache, ShadowKVCache) or isinstance(self.kv_cache, ShadowKVCache_CPU):
 
-            if q_len > 4*1024: # prefill
+            if q_len > 1: # prefill
                 # svd unrope key and save
                 self.kv_cache.get_svd(key_states, layer_idx=layer_idx)
                 query_states, key_states = self.apply_rotary_pos_emb(query_states, key_states, position_ids)

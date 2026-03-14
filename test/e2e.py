@@ -22,7 +22,9 @@ sys.path.append(root_dir)
 
 import torch
 import gc
-from termcolor import colored
+def colored(text, color):
+    colors = {'red': '\033[91m', 'green': '\033[92m', 'yellow': '\033[93m', 'blue': '\033[94m', 'cyan': '\033[96m'}
+    return f"{colors.get(color, '')}{text}\033[0m"
 from argparse import ArgumentParser, Namespace
 
 from data.dataset import Dataset
@@ -54,6 +56,12 @@ configs = {
         }
     },
     "meta-llama/Meta-Llama-3.1-8B-Instruct": {
+        "4k": {
+            "sparse_budget": 128,
+            "min_prompt_len": 4096,
+            "baseline_bsz": 1,
+            "shadowkv_bsz": 1,
+        },
         "60k": {
             "sparse_budget": 1024,
             "min_prompt_len": 1024*60,
@@ -73,6 +81,41 @@ configs = {
             "shadowkv_bsz": 12,
         }
     },
+    "/home/zijie/models/Llama-3.1-8B-Instruct": {
+        "4k": {
+            "sparse_budget": 128,
+            "min_prompt_len": 4096,
+            "baseline_bsz": 1,
+            "shadowkv_bsz": 1,
+        },
+        "60k": {
+            "sparse_budget": 1024,
+            "min_prompt_len": 1024*60,
+            "baseline_bsz": 8,
+            "shadowkv_bsz": 48,
+        },
+        "122k": {
+            "sparse_budget": 2048,
+            "min_prompt_len": 1024*122,
+            "baseline_bsz": 4,
+            "shadowkv_bsz": 24,
+        },
+        "244k": {
+            "sparse_budget": 4096,
+            "min_prompt_len": 1024*244,
+            "baseline_bsz": 2,
+            "shadowkv_bsz": 12,
+        }
+    },
+    "meta-llama/Llama-2-7b-chat-hf": {
+        "60k": {
+            "sparse_budget": 1024,
+            "min_prompt_len": 1024*60,
+            "baseline_bsz": 8,
+            "shadowkv_bsz": 48,
+        }
+    },
+
     "01-ai/Yi-9B-200K": {
         "60k": {
             "sparse_budget": 1024,
@@ -118,8 +161,9 @@ configs = {
 
 def parse_args() -> Namespace:
     p = ArgumentParser()
-    p.add_argument("--model_name", type=str, default="meta-llama/Meta-Llama-3.1-8B-Instruct", choices=["gradientai/Llama-3-8B-Instruct-Gradient-1048k", "meta-llama/Meta-Llama-3.1-8B-Instruct", "01-ai/Yi-9B-200K","THUDM/glm-4-9b-chat-1m"])
-    p.add_argument("--datalen", type=str, default="122k", choices=["60k", "122k", "244k"])
+    p.add_argument("--model_name", type=str, default="meta-llama/Meta-Llama-3.1-8B-Instruct", choices=["gradientai/Llama-3-8B-Instruct-Gradient-1048k", "meta-llama/Meta-Llama-3.1-8B-Instruct", "01-ai/Yi-9B-200K","THUDM/glm-4-9b-chat-1m", "meta-llama/Llama-2-7b-chat-hf", "/home/zijie/models/Llama-3.1-8B-Instruct"])
+    p.add_argument("--model_path", type=str, default=None, help="Local path overriding the model_name huggingface download path.")
+    p.add_argument("--datalen", type=str, default="122k", choices=["4k", "60k", "122k", "244k"])
 
     return p.parse_args()
 
@@ -128,6 +172,7 @@ if __name__ == '__main__':
     args = parse_args()
 
     model_name = args.model_name
+    model_path = args.model_path if args.model_path is not None else model_name
     length = args.datalen
 
     min_prompt_len = configs[model_name][length]["min_prompt_len"]
@@ -139,10 +184,19 @@ if __name__ == '__main__':
 
     ##################### Baseline #####################
     LLM = choose_model_class(model_name)
-    llm = LLM(model_name=model_name, device='cuda:0',  batch_size=baseline_bsz, max_length=min_prompt_len, attn_mode='full', sparse_budget=sparse_budget)
-    dataset = Dataset(dataset_name, llm.tokenizer, 256*1024, 20)
+    llm = LLM(model_name=model_path, device='cuda:0',  batch_size=baseline_bsz, max_length=min_prompt_len, attn_mode='full', sparse_budget=sparse_budget)
+    
+    # Map requested datalen to actual generated RULER lengths
+    dataset_name = "ruler/niah_single_1"
+    datalen_map = {"4k": 4096, "60k": 65536, "122k": 131072, "244k": 262144}
+    ruler_len = datalen_map.get(length, 262144)
+    dataset = Dataset(dataset_name, llm.tokenizer, ruler_len, 20)
 
-    input_ids = torch.cat([dataset[i][0][:, :min_prompt_len] for i in range(llm.batch_size)], dim=0)
+    # Gather prompts
+    input_ids_list = [dataset[i][0] for i in range(llm.batch_size)]
+    actual_min_len = min(t.shape[-1] for t in input_ids_list)
+    min_prompt_len = min(min_prompt_len, actual_min_len)
+    input_ids = torch.cat([t[:, :min_prompt_len] for t in input_ids_list], dim=0)
 
     assert input_ids.shape[-1] == min_prompt_len
 
@@ -157,12 +211,18 @@ if __name__ == '__main__':
     torch.cuda.synchronize()
 
     ##################### ShadowKV #####################
+    LLM = choose_model_class(model_name)
+    llm = LLM(model_name=model_path, device='cuda:0',  batch_size=shadowkv_bsz, max_length=min_prompt_len, attn_mode='shadowkv_cpu', sparse_budget=sparse_budget)
+    dataset = Dataset(dataset_name, llm.tokenizer, ruler_len, 100)
 
-    llm = LLM(model_name=model_name, device='cuda:0',  batch_size=shadowkv_bsz, max_length=min_prompt_len, attn_mode='shadowkv_cpu', sparse_budget=sparse_budget)
-    dataset = Dataset(dataset_name, llm.tokenizer, 256*1024, 100)
+    input_ids_list = [dataset[i][0] for i in range(llm.batch_size)]
+    actual_min_len = min(t.shape[-1] for t in input_ids_list)
+    min_prompt_len = min(min_prompt_len, actual_min_len)
+    input_ids = torch.cat([t[:, :min_prompt_len] for t in input_ids_list], dim=0)
 
-    input_ids = torch.cat([dataset[i][0][:, :min_prompt_len] for i in range(llm.batch_size)], dim=0)
+    assert input_ids.shape[-1] == min_prompt_len
+
     _, throughput_shadowkv = llm.batch_generate(input_ids.to(llm.device), gen_len=100, benchmark=True, temperature=temperature)
     print(colored(f"[ShadowKV] Throughput: {throughput_shadowkv} tokens/s", 'red'))
     
-    print(colored(f"Speedup: {throughput_shadowkv / throughput_baseline:.2f}x", 'red'))
+    print(colored(f"\n[{model_name} Datalen {length}]\nBaseline Throughput: {throughput_baseline} tokens/s\nShadowKV Throughput: {throughput_shadowkv} tokens/s\n", 'green'))

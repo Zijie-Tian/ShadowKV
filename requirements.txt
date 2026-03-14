@@ -25,7 +25,7 @@ safetensors
 scikit_learn
 scipy
 sympy
-termcolor
+
 tiktoken
 fuzzywuzzy
 torch==2.3.1

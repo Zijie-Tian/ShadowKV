@@ -34,7 +34,14 @@ from tqdm import tqdm
 import random
 import string
 from constants import TASKS
-from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
+import json
+def write_manifest(manifest_file, data):
+    with open(manifest_file, 'w') as f:
+        for item in data:
+            f.write(json.dumps(item) + '\n')
+def read_manifest(manifest_file):
+    with open(manifest_file, 'r') as f:
+        return [json.loads(line) for line in f]
 import sys
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")) 

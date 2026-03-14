@@ -25,7 +25,7 @@ import torch
 from torch.nn import functional as F
 
 from flashinfer.norm import rmsnorm
-from minference import vertical_slash_sparse_attention, block_sparse_attention, streaming_forward
+# Deferred minference import to avoid transformers version conflict
 
 from kernels import shadowkv
 
@@ -81,6 +81,7 @@ def minference_prefill_kernel(query_states, key_states, value_states, minference
 
 
 def gather_last_q_vertical_slash_topk_v4(q, k, v, head_id, minference_parttern):
+    from minference import vertical_slash_sparse_attention, block_sparse_attention, streaming_forward
     def vertical_and_slash_kernel(q, k, v, vertical_size, slash_size):
         vertical_size, slash_size  = min(q_len, max(vertical_size, 30)), min(q_len, max(slash_size, 50))
         last_q = min(64, q_len)

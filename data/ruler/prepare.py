@@ -49,6 +49,7 @@ Templates = {
     'glm': "[gMASK]sop<|system|>\nYou are a helpful assistant\n<|user|> \n{task_template}<|assistant|>\n",
     'qwen': "<|im_start|>system\nYou are a helpful assistant<|im_end|>\n<|im_start|>user\n{task_template}<|im_end|>\n<|im_start|>assistant\n",
     'phi': "<|system|>\nYou are a helpful assistant<|end|>\n<|user|>\n{task_template}<|end|>\n<|assistant|>\n",
+    'llama-2': "[INST] <<SYS>>\nYou are a helpful assistant.\n<</SYS>>\n\n{task_template} [/INST]",
 }
 
 parser = argparse.ArgumentParser()

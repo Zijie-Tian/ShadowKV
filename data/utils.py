@@ -26,7 +26,7 @@ import json
 import random
 import torch
 
-def truncate_input(input: torch.LongTensor, max_length: int, manner="middle"):
+def truncate_input(input, max_length: int, manner="middle"):
     if max_length < 0:
         return input
     if input.shape[-1] <= max_length:
