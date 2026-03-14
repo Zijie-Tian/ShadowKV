@@ -3,22 +3,28 @@
 #
 # Multi-GPU RULER Benchmark Runner for ShadowKV
 #
-# Distributes RULER tasks across multiple GPUs in parallel (round-robin).
-# Auto-generates missing RULER data, runs eval_acc.py per GPU, and aggregates
-# results into a summary table.
+# Iterates over configured models × datalens × tasks, distributing work
+# across multiple GPUs in parallel (round-robin). Auto-generates missing
+# RULER data, runs eval_acc.py per GPU, and aggregates results into a
+# summary table + CSV.
 #
 # Usage:
-#   bash scripts/run_ruler.sh \
-#     --model /home/zijie/models/Llama-3.1-8B-Instruct \
-#     --gpus 0,1 --method full --num_samples 10
+#   bash scripts/run_ruler.sh --gpus 0,1 --method full --num_samples 10
 #
 ################################################################################
 
-set -euo pipefail
+set -uo pipefail
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Configuration Lists — Edit these to control what gets tested
 # ══════════════════════════════════════════════════════════════════════════════
+
+# Models to evaluate (local paths)
+MODELS=(
+    "/home/zijie/models/Llama-3.1-8B-Instruct"
+    "/home/zijie/models/GLM-4-9B-Chat-1M"
+    "/home/zijie/models/Qwen2.5-7B-Instruct-1M"
+)
 
 # Context lengths to test (tokens)
 DATALENS=(
@@ -49,7 +55,6 @@ TASKS=(
 # ══════════════════════════════════════════════════════════════════════════════
 # Defaults (override via command-line arguments)
 # ══════════════════════════════════════════════════════════════════════════════
-MODEL="/home/zijie/models/Llama-3.1-8B-Instruct"
 GPUS="0,1"
 METHOD="full"
 NUM_SAMPLES=10
@@ -61,7 +66,6 @@ DATA_SAMPLES=500  # number of samples to generate in RULER data
 # ─── Parse Arguments ────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --model)         MODEL="$2";          shift 2 ;;
         --gpus)          GPUS="$2";           shift 2 ;;
         --method)        METHOD="$2";         shift 2 ;;
         --num_samples)   NUM_SAMPLES="$2";    shift 2 ;;
@@ -81,41 +85,39 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
 
-# ─── Detect model template ──────────────────────────────────────────────────
-MODEL_LOWER=$(echo "${MODEL}" | tr '[:upper:]' '[:lower:]')
-if [[ "${MODEL_LOWER}" == *"llama-3"* ]] || [[ "${MODEL_LOWER}" == *"llama_3"* ]] || [[ "${MODEL_LOWER}" == *"llama3"* ]]; then
-    TEMPLATE="llama-3"
-elif [[ "${MODEL_LOWER}" == *"llama-2"* ]] || [[ "${MODEL_LOWER}" == *"llama_2"* ]] || [[ "${MODEL_LOWER}" == *"llama2"* ]]; then
-    TEMPLATE="llama-2"
-elif [[ "${MODEL_LOWER}" == *"yi"* ]]; then
-    TEMPLATE="yi"
-elif [[ "${MODEL_LOWER}" == *"glm"* ]]; then
-    TEMPLATE="glm"
-elif [[ "${MODEL_LOWER}" == *"qwen"* ]]; then
-    TEMPLATE="qwen"
-elif [[ "${MODEL_LOWER}" == *"phi"* ]]; then
-    TEMPLATE="phi"
-else
-    echo "ERROR: Cannot auto-detect model template from '${MODEL}'"
-    echo "Supported: llama-3, llama-2, yi, glm, qwen, phi"
-    exit 1
-fi
+# ─── Template detection function ────────────────────────────────────────────
+detect_template() {
+    local model_lower
+    model_lower=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    if [[ "${model_lower}" == *"llama-3"* ]] || [[ "${model_lower}" == *"llama_3"* ]] || [[ "${model_lower}" == *"llama3"* ]]; then
+        echo "llama-3"
+    elif [[ "${model_lower}" == *"llama-2"* ]] || [[ "${model_lower}" == *"llama_2"* ]] || [[ "${model_lower}" == *"llama2"* ]]; then
+        echo "llama-2"
+    elif [[ "${model_lower}" == *"yi"* ]]; then
+        echo "yi"
+    elif [[ "${model_lower}" == *"glm"* ]]; then
+        echo "glm"
+    elif [[ "${model_lower}" == *"qwen"* ]]; then
+        echo "qwen"
+    elif [[ "${model_lower}" == *"phi"* ]]; then
+        echo "phi"
+    else
+        echo ""
+    fi
+}
 
 # ─── Derived variables ──────────────────────────────────────────────────────
 IFS=',' read -ra GPU_ARRAY <<< "${GPUS}"
 NUM_GPUS=${#GPU_ARRAY[@]}
 NUM_TASKS=${#TASKS[@]}
 NUM_LENS=${#DATALENS[@]}
-MODEL_SHORT=$(basename "${MODEL}")
-LOG_DIR="archive/${MODEL_SHORT}/logs"
-mkdir -p "${LOG_DIR}"
+NUM_MODELS=${#MODELS[@]}
 
 # ─── Print configuration ────────────────────────────────────────────────────
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║              ShadowKV RULER Benchmark Runner                ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
-printf "║  Model:    %-48s║\n" "${MODEL_SHORT}"
-printf "║  Template: %-48s║\n" "${TEMPLATE}"
+printf "║  Models:   %-48s║\n" "${NUM_MODELS} models"
 printf "║  GPUs:     %-48s║\n" "${GPUS} (${NUM_GPUS} devices)"
 printf "║  Tasks:    %-48s║\n" "${NUM_TASKS} tasks"
 printf "║  DataLens: %-48s║\n" "${DATALENS[*]}"
@@ -126,16 +128,38 @@ printf "║  Rank:     %-48s║\n" "${RANK}"
 printf "║  ChunkSz:  %-48s║\n" "${CHUNK_SIZE}"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
+for M in "${MODELS[@]}"; do
+    printf "  • %s\n" "$(basename "${M}")"
+done
+echo ""
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Main loop: iterate over each datalen
+# Main loop: iterate over each model × datalen
 # ═══════════════════════════════════════════════════════════════════════════
 TOTAL_FAILURES=0
 
+for MODEL in "${MODELS[@]}"; do
+
+MODEL_SHORT=$(basename "${MODEL}")
+TEMPLATE=$(detect_template "${MODEL}")
+
+if [[ -z "${TEMPLATE}" ]]; then
+    echo "⚠ Skipping ${MODEL_SHORT}: cannot detect template"
+    continue
+fi
+
+LOG_DIR="archive/${MODEL_SHORT}/logs"
+mkdir -p "${LOG_DIR}"
+
+echo "╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍"
+echo "  Model: ${MODEL_SHORT}  (template: ${TEMPLATE})"
+echo "╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍"
+
 for DATALEN in "${DATALENS[@]}"; do
 
+echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  DataLen: ${DATALEN}"
+echo "  ${MODEL_SHORT} | DataLen: ${DATALEN}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # ─── Step 1: Auto-generate missing RULER data ────────────────────────────
@@ -180,7 +204,7 @@ done
 NUM_AVAIL=${#AVAIL_TASKS[@]}
 
 if [[ ${NUM_AVAIL} -eq 0 ]]; then
-    echo "  ERROR: No RULER data available for datalen=${DATALEN}. Skipping."
+    echo "  ERROR: No RULER data available for ${MODEL_SHORT} datalen=${DATALEN}. Skipping."
     continue
 fi
 
@@ -210,7 +234,7 @@ done
 
 # ─── Step 3: Launch parallel eval_acc.py processes ───────────────────────
 echo ""
-echo "── [3/3] Running evaluation (datalen=${DATALEN}) ──"
+echo "── [3/3] Running evaluation ──"
 
 PIDS=()
 ACTIVE_GPUS=()
@@ -244,21 +268,38 @@ echo ""
 echo "  Waiting for ${#PIDS[@]} GPU processes..."
 
 FAILURES=0
+HAS_OOM=false
 for ((i = 0; i < ${#PIDS[@]}; i++)); do
     PID=${PIDS[$i]}
     GPU_ID=${ACTIVE_GPUS[$i]}
     if wait "${PID}"; then
         echo "  ✓ GPU ${GPU_ID} (PID ${PID}) — done"
     else
-        echo "  ✗ GPU ${GPU_ID} (PID ${PID}) — FAILED (exit code: $?)"
+        EXIT_CODE=$?
+        # Check if failure was due to OOM
+        LATEST_LOG=$(ls -t "${LOG_DIR}/gpu${GPU_ID}_${DATALEN}_"*.log 2>/dev/null | head -1)
+        if [[ -n "${LATEST_LOG}" ]] && grep -qE "CUDA out of memory|OutOfMemoryError|torch.cuda.OutOfMemoryError" "${LATEST_LOG}"; then
+            echo "  ⚠ GPU ${GPU_ID} (PID ${PID}) — OOM (out of memory)"
+            HAS_OOM=true
+        else
+            echo "  ✗ GPU ${GPU_ID} (PID ${PID}) — FAILED (exit code: ${EXIT_CODE})"
+        fi
         FAILURES=$((FAILURES + 1))
     fi
 done
 TOTAL_FAILURES=$((TOTAL_FAILURES + FAILURES))
 
-if [[ ${FAILURES} -gt 0 ]]; then
+# Write OOM marker if any GPU hit OOM for this model+datalen
+if [[ "${HAS_OOM}" == true ]]; then
+    OOM_MARKER="archive/${MODEL_SHORT}/ruler/.oom_${DATALEN}_${METHOD}_${SPARSE_BUDGET}_${RANK}_${CHUNK_SIZE}"
+    mkdir -p "$(dirname "${OOM_MARKER}")"
+    touch "${OOM_MARKER}"
+    echo "  → OOM marker written: ${OOM_MARKER}"
+fi
+
+if [[ ${FAILURES} -gt 0 && "${HAS_OOM}" == false ]]; then
     echo ""
-    echo "  ⚠ ${FAILURES} GPU(s) failed for datalen=${DATALEN}. Check logs:"
+    echo "  ⚠ ${FAILURES} GPU(s) failed for ${MODEL_SHORT} datalen=${DATALEN}. Check logs:"
     for ((g = 0; g < NUM_GPUS; g++)); do
         if [[ -n "${GPU_TASK_LISTS[$g]}" ]]; then
             GPU_ID="${GPU_ARRAY[$g]}"
@@ -271,71 +312,26 @@ if [[ ${FAILURES} -gt 0 ]]; then
     done
 fi
 
-echo ""
 done  # end datalen loop
+done  # end model loop
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Final Summary — aggregate ALL results across all datalens
+# Final Summary — aggregate ALL results across all models × datalens
 # ══════════════════════════════════════════════════════════════════════════════
+echo ""
 echo "════════════════════════ Results Summary ════════════════════════"
 echo ""
 
-python3 -c "
-import json, os, glob, sys
-
-model_short = '${MODEL_SHORT}'
-method = '${METHOD}'
-sparse_budget = '${SPARSE_BUDGET}'
-rank = '${RANK}'
-chunk_size = '${CHUNK_SIZE}'
-datalens = [$(IFS=,; echo "${DATALENS[*]}")]
-
-archive_dir = f'archive/{model_short}'
-
-all_results = {}  # {datalen: [(task, samples, acc)]}
-
-for datalen in datalens:
-    pattern = f'{archive_dir}/ruler/*_{datalen}_{method}_{sparse_budget}_{rank}_{chunk_size}.jsonl'
-    files = sorted(glob.glob(pattern))
-    results = []
-    for f in files:
-        task = os.path.basename(f).replace(f'_{datalen}_{method}_{sparse_budget}_{rank}_{chunk_size}.jsonl', '')
-        scores = []
-        with open(f) as fh:
-            for line in fh:
-                data = json.loads(line)
-                scores.extend(data.get('correct', []))
-        if scores:
-            avg = sum(scores) / len(scores)
-            results.append((task, len(scores), avg))
-    if results:
-        all_results[datalen] = results
-
-if not all_results:
-    print('No result files found.')
-    sys.exit(0)
-
-print(f'Model: {model_short} | Method: {method}')
-print()
-
-for datalen in sorted(all_results.keys()):
-    results = all_results[datalen]
-    print(f'### DataLen: {datalen}')
-    print()
-    print('| Dataset | Samples | Accuracy |')
-    print('|:--------|--------:|---------:|')
-    total_score = 0
-    for task, samples, acc in results:
-        print(f'| ruler/{task} | {samples} | {acc:.4f} |')
-        total_score += acc
-    avg_all = total_score / len(results)
-    print(f'| **Average** | - | **{avg_all:.4f}** |')
-    print()
-"
+python3 scripts/summarize_ruler.py \
+    --models "${MODELS[@]}" \
+    --method "${METHOD}" \
+    --sparse_budget "${SPARSE_BUDGET}" \
+    --rank "${RANK}" \
+    --chunk_size "${CHUNK_SIZE}" \
+    --datalens "${DATALENS[@]}"
 
 echo "════════════════════════════════════════════════════════════════"
-echo "Full logs:    ${LOG_DIR}/"
-echo "Result files: archive/${MODEL_SHORT}/ruler/"
+echo "Result files: archive/*/ruler/"
 if [[ ${TOTAL_FAILURES} -gt 0 ]]; then
     echo "⚠ Total failures: ${TOTAL_FAILURES}"
 fi
