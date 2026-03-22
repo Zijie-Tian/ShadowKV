@@ -22,16 +22,16 @@ set -uo pipefail
 # Models to evaluate (local paths)
 MODELS=(
     "/home/zijie/models/Llama-3.1-8B-Instruct"
-    "/home/zijie/models/GLM-4-9B-Chat-1M"
+    # "/home/zijie/models/GLM-4-9B-Chat-1M"
     "/home/zijie/models/Qwen2.5-7B-Instruct-1M"
 )
 
 # Context lengths to test (tokens)
 DATALENS=(
     4096
-    # 8192
-    # 16384
-    # 32768
+    8192
+    16384
+    32768
     # 65536
     # 131072
     # 262144
@@ -40,28 +40,30 @@ DATALENS=(
 # RULER tasks to evaluate
 TASKS=(
     "niah_single_1"
-    # "niah_single_2"
-    # "niah_single_3"
-    # "niah_multikey_1"
-    # "niah_multikey_2"
-    # "niah_multivalue"
-    # "niah_multiquery"
+    "niah_single_2"
+    "niah_single_3"
+    "niah_multikey_1"
+    "niah_multikey_2"
+    "niah_multikey_3"
+    "niah_multivalue"
+    "niah_multiquery"
     "vt"
+    "cwe"
     "fwe"
     "qa_1"
-    # "qa_2"
+    "qa_2"
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Defaults (override via command-line arguments)
 # ══════════════════════════════════════════════════════════════════════════════
-GPUS="0,1"
+GPUS="0,1,2,5"
 METHOD="full"
-NUM_SAMPLES=10
+NUM_SAMPLES=200
 SPARSE_BUDGET=2048
 RANK=160
 CHUNK_SIZE=8
-DATA_SAMPLES=500  # number of samples to generate in RULER data
+DATA_SAMPLES=200  # number of samples to generate in RULER data
 
 # ─── Parse Arguments ────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -166,32 +168,43 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "── [1/3] Checking & generating RULER data ──"
 DATA_DIR="data/ruler/data/${TEMPLATE}/${DATALEN}"
 
+PREP_PIDS=()
 for TASK in "${TASKS[@]}"; do
     JSONL="${DATA_DIR}/${TASK}/validation.jsonl"
     if [[ -f "${JSONL}" ]]; then
         LINES=$(wc -l < "${JSONL}")
         echo "  ✓ ${TASK} — exists (${LINES} samples)"
     else
-        echo "  ✗ ${TASK} — generating (${DATA_SAMPLES} samples)..."
+        echo "  ✗ ${TASK} — launching generation for (${DATA_SAMPLES} samples)..."
         mkdir -p "${DATA_DIR}"
-        python data/ruler/prepare.py \
-            --save_dir "${DATA_DIR}" \
-            --benchmark synthetic \
-            --task "${TASK}" \
-            --tokenizer_path "${MODEL}" \
-            --tokenizer_type hf \
-            --max_seq_length "${DATALEN}" \
-            --model_template_type "${TEMPLATE}" \
-            --num_samples "${DATA_SAMPLES}" \
-            2>&1 | sed 's/^/    /'
-        if [[ -f "${JSONL}" ]]; then
-            LINES=$(wc -l < "${JSONL}")
-            echo "  ✓ ${TASK} — generated (${LINES} samples)"
-        else
-            echo "  ⚠ ${TASK} — generation failed, skipping"
-        fi
+        (
+            python data/ruler/prepare.py \
+                --save_dir "${DATA_DIR}" \
+                --benchmark synthetic \
+                --task "${TASK}" \
+                --tokenizer_path "${MODEL}" \
+                --tokenizer_type hf \
+                --max_seq_length "${DATALEN}" \
+                --model_template_type "${TEMPLATE}" \
+                --num_samples "${DATA_SAMPLES}" \
+                > "${DATA_DIR}/${TASK}_prepare.log" 2>&1
+            
+            if [[ -f "${JSONL}" ]]; then
+                LINES=$(wc -l < "${JSONL}")
+                echo "  ✓ ${TASK} — generated (${LINES} samples)"
+            else
+                echo "  ⚠ ${TASK} — generation failed, skipping. Check ${DATA_DIR}/${TASK}_prepare.log"
+            fi
+        ) &
+        PREP_PIDS+=($!)
     fi
 done
+
+if [[ ${#PREP_PIDS[@]} -gt 0 ]]; then
+    echo "  Waiting for ${#PREP_PIDS[@]} parallel generation jobs to complete..."
+    wait "${PREP_PIDS[@]}"
+    echo "  ✓ All generation jobs finished."
+fi
 
 # Rebuild task list with only available tasks
 AVAIL_TASKS=()
