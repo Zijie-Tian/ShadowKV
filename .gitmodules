@@ -1,0 +1,8 @@
+[submodule "3rdparty/vllm"]
+	path = 3rdparty/vllm
+	url = git@github.com:Zijie-Tian/vllm.git
+	branch = tzj/compass
+[submodule "3rdparty/flash-attention"]
+	path = 3rdparty/flash-attention
+	url = git@github.com:Zijie-Tian/flash-attention.git
+	branch = tzj/compass

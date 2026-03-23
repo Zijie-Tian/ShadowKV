@@ -75,7 +75,7 @@ def parse_args() -> Namespace:
     p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--datalen", type=int, default=128*1024, help="The length of the context.")
     p.add_argument("--method", type=str, default="full")
-    p.add_argument("--sparse_budget", default=2048)
+    p.add_argument("--sparse_budget", type=int, default=2048)
     p.add_argument("--rank", type=int, default=160)
     p.add_argument("--chunk_size", type=int, default=8)
     p.add_argument("--minference", action='store_true', default=False)

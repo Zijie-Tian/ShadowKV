@@ -83,13 +83,14 @@ python test/e2e.py --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" --datale
 - **Offload Misses**: Look at `self.offsets`, `self.cnts` and `self.signals` in `ShadowKVCache_CPU`. Print `self.position_ids` to ensure chunk limits don't exceed `self.chunks`.
 
 ## 🤖 5. Antigravity Prompt Directives
+- **Rule Management**: All project-specific AI agent rules MUST be added directly to this `GEMINI.md` file. Do not create separate rule files or use the `.agents/rules` directory.
 - **Zero-Shot Assumptions**: When asked to add a new model architecture to ShadowKV, reference how `llama.py` or `qwen.py` inherets/implements the `LLM` class. 
 - **Variable Auditing**: When modifying `ShadowKVCache_CPU::prefill_kv_cache()`, explicitly verify the tensor shape matching against `head_dim` and `chunk_size` logic.
 - **Dependency Installation Rules**: `pip install` is permitted but **strictly limited** to the `shadowkv` conda environment. You **must not** use `pip install -e .` (or equivalent editable installs) for this repository. Instead, execution relies purely on `PYTHONPATH` to resolve importing the current directory. Rely on `flash-attn`, `minference`, and built-in Torch capabilities wherever possible.
 
 ## ⚙️ 6. Environment Execution Rules
-- **Strict Conda Environment**: You **MUST ALWAYS** use the `shadowkv` conda environment when executing any Python scripts or running terminal commands within this repository. 
-- **Execution Format**: Ensure the environment is active before execution. For example, use `conda run -n shadowkv python <script.py>` or chain the activation like `source ~/anaconda3/etc/profile.d/conda.sh && conda activate shadowkv && python <script.py>`. Do not use the base environment.
+- **Strict Conda Environment (CRITICAL)**: All commands executed within the current repository MUST be done strictly under the `shadowkv` conda environment. This is extremely important to ensure that other environments are completely unaffected.
+- **Execution Format**: Ensure the environment is active before execution. For example, use `conda run -n shadowkv ...` or chain the activation like `source ~/anaconda3/etc/profile.d/conda.sh && conda activate shadowkv && ...`. Never use the base environment for this repository.
 
 ## 📝 7. Documentation Management Rules
 - **Two-Tier Structure**: All technical documentation follows a two-tier structure:

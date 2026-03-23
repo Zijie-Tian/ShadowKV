@@ -142,7 +142,7 @@ class Qwen2(LLM):
         self.lm_head = hf_model.lm_head.weight.detach().to(self.device)
         self.norm_weight = hf_model.model.norm.weight.detach().to(self.device)
         self.norm_variance_epsilon = hf_model.model.norm.variance_epsilon
-        self.cos_cache, self.sin_cache = self._set_cos_sin_cache(hf_model.model.layers[0].self_attn.rotary_emb.inv_freq.to(self.device))
+        self.cos_cache, self.sin_cache = self._set_cos_sin_cache(hf_model.model.rotary_emb.inv_freq.to(self.device))
         self.cos_sin_cache = torch.cat((self.cos_cache[:, :64], self.sin_cache[:, :64]), dim=-1)
         self.layers :list[Qwen2Layer] = []
 

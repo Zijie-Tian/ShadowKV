@@ -157,10 +157,10 @@ class Llama(LLM):
         self.norm_weight = hf_model.model.norm.weight.detach().to(self.device)
         self.norm_variance_epsilon = hf_model.model.norm.variance_epsilon
         try:
-            cos_cache = hf_model.model.layers[0].self_attn.rotary_emb.cos_cached[:self.max_length+1024].to(self.device).to(self.dtype)
-            sin_cache = hf_model.model.layers[0].self_attn.rotary_emb.sin_cached[:self.max_length+1024].to(self.device).to(self.dtype)
+            cos_cache = hf_model.model.rotary_emb.cos_cached[:self.max_length+1024].to(self.device).to(self.dtype)
+            sin_cache = hf_model.model.rotary_emb.sin_cached[:self.max_length+1024].to(self.device).to(self.dtype)
         except:
-            cos_cache, sin_cache = self._set_cos_sin_cache(hf_model.model.layers[0].self_attn.rotary_emb.inv_freq.to(self.device))
+            cos_cache, sin_cache = self._set_cos_sin_cache(hf_model.model.rotary_emb.inv_freq.to(self.device))
         self.cos_sin_cache = torch.cat((cos_cache[:, :64], sin_cache[:, :64]), dim=-1)
         
         del cos_cache, sin_cache
@@ -206,7 +206,7 @@ class Llama(LLM):
         d = hidden_states.shape[-1] // 2
         output_shape = (hidden_states.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)
-        vllm._custom_ops.silu_and_mul(out, hidden_states)
+        torch.ops._C.silu_and_mul(out, hidden_states)
         
         hidden_states = F.linear(out, buffer.down_proj)
         hidden_states = residual + hidden_states

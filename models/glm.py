@@ -188,7 +188,7 @@ class GLM(LLM):
         d = hidden_states.shape[-1] // 2
         output_shape = (hidden_states.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)
-        vllm._custom_ops.silu_and_mul(out, hidden_states)
+        torch.ops._C.silu_and_mul(out, hidden_states)
         
         hidden_states = F.linear(out, buffer.down_proj)
         hidden_states = residual + hidden_states
