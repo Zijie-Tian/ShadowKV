@@ -6,3 +6,6 @@
 	path = 3rdparty/flash-attention
 	url = git@github.com:Zijie-Tian/flash-attention.git
 	branch = tzj/compass
+[submodule "3rdparty/cutlass"]
+	path = 3rdparty/cutlass
+	url = https://github.com/nvidia/cutlass.git
