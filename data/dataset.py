@@ -16,6 +16,7 @@
 ################################################################################
 
 import json
+import os
 from pathlib import Path
 
 from datasets import load_dataset
@@ -186,15 +187,23 @@ class Dataset:
         return self.dataset_name
 
     def build_longbench_chat(self, prompt: str, task: str) -> str:
-        """Mirror Quest's LongBench chat wrapping where it applies.
+        """Mirror LongBench chat wrapping where it applies.
 
-        Quest does not add a Llama-3-specific wrapper, which is the path used by
-        the local ShadowKV smoke tests. Keep this intentionally conservative to
-        avoid introducing new prompt dependencies such as fastchat.
+        LUTAttn wraps Llama-3.2 prompts with the tokenizer chat template except
+        for format-sensitive LongBench tasks. Keep this dependency-free by using
+        the model tokenizer directly instead of adding fastchat-style helpers.
         """
         model_name = self.tokenizer.name_or_path.lower()
         if task in LONG_BENCH_NO_CHAT_TASKS:
             return prompt
+        is_llama32 = "llama-3.2" in model_name or "llama3.2" in model_name
+        if is_llama32 and getattr(self.tokenizer, "chat_template", None):
+            messages = [{"role": "user", "content": prompt}]
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
         if "llama-2" in model_name:
             return f"[INST]{prompt}[/INST]"
         return prompt
@@ -329,7 +338,11 @@ class Dataset:
                 raise ValueError(f"LongBench task {task} not found")
 
             hf_task = f"{task}_e" if self.longbench_e else task
-            dataset = load_dataset("THUDM/LongBench", hf_task, split="test")
+            dataset_source = os.environ.get("SHADOWKV_LONGBENCH_DATASET", "THUDM/LongBench")
+            load_kwargs = {}
+            if dataset_source != "THUDM/LongBench" or os.environ.get("HF_DATASETS_TRUST_REMOTE_CODE"):
+                load_kwargs["trust_remote_code"] = True
+            dataset = load_dataset(dataset_source, hf_task, split="test", **load_kwargs)
             if self.num_samples > 0:
                 self.num_samples = min(self.num_samples, len(dataset))
             else:

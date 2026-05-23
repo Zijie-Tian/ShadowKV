@@ -3,7 +3,7 @@
 本文档说明如何在 ShadowKV 中运行 LongBench accuracy smoke / debug。实现参考了 `~/Code/Quest/evaluation/LongBench` 的 prompt、max generation、metric 配置，并接入当前仓库的 `test/eval_acc.py` / `Evaluator` / `Dataset` 流程。
 
 > [!IMPORTANT]
-> 本仓库测试命令必须在 `shadowkv` conda 环境中执行。GPU 调试时请显式限制 `CUDA_VISIBLE_DEVICES=0`，避免占用其他 GPU。
+> 本仓库测试命令必须在 `shadowkv` conda 环境中执行。单卡 GPU 调试时请显式限制 `CUDA_VISIBLE_DEVICES=0`，避免占用其他 GPU。
 
 ## 快速开始：GPU0 两样本调试
 
@@ -30,7 +30,7 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/run_longbench.sh \
 | 参数 | 说明 | 默认值 |
 |---|---|---|
 | `--model` | HuggingFace 模型路径或名称 | `/home/zijie/models/Llama-3.1-8B-Instruct` |
-| `--gpu` / `--gpus` | 单 GPU 编号 | `0` |
+| `--gpu` / `--gpus` | 单 GPU 编号、逗号分隔多 GPU 编号，或 `all` | `0` |
 | `--method` | `full` / `shadowkv` | `shadowkv` |
 | `--tasks` | 逗号分隔任务名，或 `all` | `all` |
 | `--num_samples` | 每个 LongBench subtask 取样数量 | `2` |
@@ -60,6 +60,43 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/run_longbench.sh \
   --tasks qasper,narrativeqa,hotpotqa \
   --num_samples 2 --max_gen 8
 ```
+
+## 多 GPU task 分片
+
+`--gpus` 传入多个 GPU（例如 `0,1,2,3,4,5`）或 `all` 时，`scripts/run_longbench.sh`
+会在脚本内部按 task round-robin 分片，每张 GPU 启动一个单卡子进程，所有子进程写入同一个输出目录中互不重叠的
+`<task>.jsonl`，最后由父进程统一调用 `score_longbench.py` 生成 `result.json`。
+
+```bash
+source ~/anaconda3/etc/profile.d/conda.sh
+conda activate shadowkv
+
+SHADOWKV_LONGBENCH_DATASET=/home/zijie/data/LongBench \
+bash scripts/run_longbench.sh \
+  --gpus all \
+  --model /home/zijie/models/Llama-3.2-1B-Instruct \
+  --method shadowkv \
+  --tasks all \
+  --num_samples 1 \
+  --datalen 4096 \
+  --sparse_budget 128 \
+  --rank 160 \
+  --chunk_size 8 \
+  --max_gen 1
+```
+
+多 GPU 输出目录包含：
+
+```text
+logs/task_shards.tsv
+logs/gpu0.log
+logs/gpu1.log
+...
+logs/score_*.log
+result.json
+```
+
+`SHADOWKV_LONGBENCH_DATASET` 可用于指定本机 LongBench 数据集路径；未设置时默认仍使用 `THUDM/LongBench`。
 
 ## 输出位置
 

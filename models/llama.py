@@ -26,6 +26,7 @@ from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 transformers.logging.set_verbosity_error()
 
 import vllm
+import vllm._custom_ops  # Ensure vllm._custom_ops is registered on the package.
 
 from .tensor_op import layer_norm, apply_rotary_pos_emb, apply_rotary_pos_emb_single, apply_rotary_pos_emb_cuda
 from .prompt_template import Templates, Chat_Templates, Prefix_Templates
@@ -144,7 +145,9 @@ class Llama(LLM):
 
     @torch.inference_mode()
     def apply_rotary_pos_emb(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
-        vllm._custom_ops.rotary_embedding(position_ids, q, k, 128, self.cos_sin_cache, True)
+        vllm._custom_ops.rotary_embedding(
+            position_ids, q, k, self.head_dim, self.cos_sin_cache, True
+        )
         bsz = q.shape[0]
         q = q.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(bsz, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -161,7 +164,11 @@ class Llama(LLM):
             sin_cache = hf_model.model.rotary_emb.sin_cached[:self.max_length+1024].to(self.device).to(self.dtype)
         except:
             cos_cache, sin_cache = self._set_cos_sin_cache(hf_model.model.rotary_emb.inv_freq.to(self.device))
-        self.cos_sin_cache = torch.cat((cos_cache[:, :64], sin_cache[:, :64]), dim=-1)
+        rotary_half_dim = self.head_dim // 2
+        self.cos_sin_cache = torch.cat(
+            (cos_cache[:, :rotary_half_dim], sin_cache[:, :rotary_half_dim]),
+            dim=-1,
+        )
         
         del cos_cache, sin_cache
 
@@ -211,4 +218,3 @@ class Llama(LLM):
         hidden_states = F.linear(out, buffer.down_proj)
         hidden_states = residual + hidden_states
         return hidden_states
-

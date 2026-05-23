@@ -314,9 +314,24 @@ class ShadowKVCache:
                 device=query_states.device,
                 dtype=torch.long,
             )
-        # print(query_states.view(-1, self.num_key_value_heads, self.num_key_value_groups, self.incoming_q_len, self.head_dim).shape, self.k_landmark[layer_idx].transpose(2, 3).shape)
-        # [bsz, 8, 4, q_len, 128] * [bsz, 8, 128, chunks] --> [bsz, 8, 4, q_len, chunks]
-        chunk_attn = torch.einsum('bhgqd,bhdc->bhgqc', query_states.view(-1, self.num_key_value_heads, self.num_key_value_groups, self.incoming_q_len, self.head_dim), self.k_landmark[layer_idx].transpose(2, 3)).squeeze(2) / math.sqrt(128)
+        query_by_group = query_states.view(
+            -1,
+            self.num_key_value_heads,
+            self.num_key_value_groups,
+            self.incoming_q_len,
+            self.head_dim,
+        )
+        # [bsz, kv_heads, groups, q_len, head_dim]
+        #   * [bsz, kv_heads, head_dim, chunks]
+        #   -> [bsz, kv_heads, groups, q_len, chunks]
+        chunk_attn = (
+            torch.einsum(
+                'bhgqd,bhdc->bhgqc',
+                query_by_group,
+                self.k_landmark[layer_idx].transpose(2, 3),
+            ).squeeze(2)
+            / math.sqrt(self.head_dim)
+        )
         chunk_attn = nn.functional.softmax(chunk_attn, dim=-1, dtype=torch.float32).to(self.dtype) # [bsz, 8, 4, q_len, chunks]
         chunk_attn = chunk_attn.sum(dim = -2) # [bsz, 8, 4, chunks]
         if self.num_key_value_groups > 1:
