@@ -26,7 +26,6 @@ from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 transformers.logging.set_verbosity_error()
 
 import vllm
-from minference.configs.model2path import MODEL2PATH
 
 from .tensor_op import layer_norm, apply_rotary_pos_emb, apply_rotary_pos_emb_single, apply_rotary_pos_emb_cuda
 from .prompt_template import Templates, Chat_Templates, Prefix_Templates
@@ -126,6 +125,7 @@ class Llama(LLM):
         self.init_kv_cache(sparse_budget, rank, chunk_size, self.config)
 
         if self.minference:
+            from minference.configs.model2path import MODEL2PATH
             import json
             self.minference_parttern = []
             for layer_idx in range(self.num_layers):
@@ -211,5 +211,4 @@ class Llama(LLM):
         hidden_states = F.linear(out, buffer.down_proj)
         hidden_states = residual + hidden_states
         return hidden_states
-
 

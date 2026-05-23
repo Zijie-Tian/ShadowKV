@@ -27,8 +27,7 @@ ShadowKV is a training-free, high-throughput long-context LLM inference framewor
 ### Python Modeling Layer (`models/`)
 - **`kv_cache.py`**: The heart of ShadowKV. 
   - `KV_Cache`: Baseline full attention wrapper.
-  - `ShadowKVCache`: ShadowKV logic tailored for accuracy tests (batch size 1).
-  - `ShadowKVCache_CPU`: Highly optimized CPU offloading version serving actual inference throughput. Manages pointers, offsets, buffers, and signals for asynchronous GPU/CPU memory transfers.
+  - `ShadowKVCache`: ShadowKV logic tailored for accuracy/LongBench tests (batch size 1). The previous CPU offload cache path has been retired.
 - **`base.py`**: The `LLM` base wrapper managing `inference()`, `prefill()`, and `generate()`. Wraps generation loops and hooks up the custom `kv_cache.py` configurations based on `attn_mode`.
 - **`tensor_op.py`**: The bridge between Python and custom CUDA kernels. Defines functions like `apply_rotary_pos_emb_cuda` and `batch_gather_gemm_rotary_pos_emb_cuda`.
 
@@ -80,12 +79,12 @@ python test/e2e.py --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" --datale
 
 ### Debugging Tips 🐜
 - **CUDA Errors**: If a kernel modification causes a device assert or illegal memory access, use `CUDA_LAUNCH_BLOCKING=1 python test/e2e.py ...` to trace the exact kernel throwing the fault.
-- **Offload Misses**: Look at `self.offsets`, `self.cnts` and `self.signals` in `ShadowKVCache_CPU`. Print `self.position_ids` to ensure chunk limits don't exceed `self.chunks`.
+- **Sparse Retrieval Bounds**: For short prompts, verify `active_select_sets` never exceeds the available landmark chunks before calling `torch.topk`.
 
 ## 🤖 5. Antigravity Prompt Directives
 - **Rule Management**: All project-specific AI agent rules MUST be added directly to this `GEMINI.md` file. Do not create separate rule files or use the `.agents/rules` directory.
 - **Zero-Shot Assumptions**: When asked to add a new model architecture to ShadowKV, reference how `llama.py` or `qwen.py` inherets/implements the `LLM` class. 
-- **Variable Auditing**: When modifying `ShadowKVCache_CPU::prefill_kv_cache()`, explicitly verify the tensor shape matching against `head_dim` and `chunk_size` logic.
+- **Variable Auditing**: When modifying `ShadowKVCache.prefill_kv_cache()`, explicitly verify the tensor shape matching against `head_dim`, `chunk_size`, and active sparse-budget logic.
 - **Dependency Installation Rules**: `pip install` is permitted but **strictly limited** to the `shadowkv` conda environment. You **must not** use `pip install -e .` (or equivalent editable installs) for this repository. Instead, execution relies purely on `PYTHONPATH` to resolve importing the current directory. Rely on `flash-attn`, `minference`, and built-in Torch capabilities wherever possible.
 
 ## ⚙️ 6. Environment Execution Rules
@@ -108,7 +107,7 @@ python test/e2e.py --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" --datale
 
 | 主题 | 文档路径 | 摘要 |
 |------|----------|------|
-| KV Cache Offload & Load | [`docs/kv_cache_offload_load.md`](docs/kv_cache_offload_load.md) | 详述 Prefill 阶段的 V cache CPU offload、K cache SVD 压缩，以及 Decode 阶段的稀疏 Value 加载（`gather_copy_with_offsets`）和 Key 在线重建（CUTLASS GEMM + RoPE）的完整流程与 buffer 布局。 |
-| K Cache 低秩分解 | [`docs/k_cache_low_rank_decomposition.md`](docs/k_cache_low_rank_decomposition.md) | 详述 Pre-RoPE Key 的 SVD 压缩原理（rank=160）、`ShadowKVCache` vs `ShadowKVCache_CPU` 的 U/SV 存储布局差异、CUTLASS `GemmUniversalBatchGatherIndices` kernel 的 Gather-GEMM-RoPE fused 重建流程，以及 6.4× 压缩比的存储分析。 |
+| K Cache 低秩分解 | [`docs/k_cache_low_rank_decomposition.md`](docs/k_cache_low_rank_decomposition.md) | 详述 Pre-RoPE Key 的 SVD 压缩原理（rank=160）、`ShadowKVCache` 的 U/SV 存储布局、PyTorch gather-GEMM-RoPE 重建流程，以及 6.4× 压缩比的存储分析。 |
 | RULER Benchmark 测试 | [`docs/run_ruler.md`](docs/run_ruler.md) | `scripts/run_ruler.sh` 多 GPU 并行 RULER 精度测试脚本的使用指南，包括参数说明、可用任务列表、支持的模型、输出格式及常见用法。**所有 RULER 测试必须通过此脚本启动。** |
 | E2E Throughput Sweep | [`docs/e2e_throughput_sweep.md`](docs/e2e_throughput_sweep.md) | `test/e2e_sweep.py` + `test/e2e_single_run.py` 吞吐量扫描测试脚本的使用指南，支持多 GPU 并行、OOM 自动跳过、子进程隔离，用于复现论文 Table 4。 |
+| LongBench Benchmark 测试 | [`docs/run_longbench.md`](docs/run_longbench.md) | `scripts/run_longbench.sh` GPU-scoped LongBench 调试/评测入口，复用 Quest 的 prompt/max-gen/metric 配置，支持每个 subtask 两样本 smoke。 |

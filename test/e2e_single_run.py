@@ -51,7 +51,7 @@ def parse_args():
                    help="Model name (used for choose_model_class and config lookup)")
     p.add_argument("--model_path", type=str, default=None,
                    help="Local path to model weights (overrides model_name for loading)")
-    p.add_argument("--method", type=str, required=True, choices=["full", "shadowkv_cpu"])
+    p.add_argument("--method", type=str, required=True, choices=["full", "shadowkv"])
     p.add_argument("--batch_size", type=int, required=True)
     p.add_argument("--datalen", type=str, required=True, choices=list(DATALEN_CONFIGS.keys()))
     p.add_argument("--gen_len", type=int, default=100)
@@ -76,7 +76,9 @@ def main():
     ruler_len = cfg["ruler_len"]
     temperature = 0.6
 
-    attn_mode = "full" if method == "full" else "shadowkv_cpu"
+    attn_mode = method
+    if method == "shadowkv" and batch_size != 1:
+        raise ValueError("shadowkv uses the batch_size=1 ShadowKVCache path; the CPU offload cache path has been removed")
 
     # Build model
     LLM = choose_model_class(model_name)

@@ -10,6 +10,7 @@
 #
 # Usage:
 #   bash scripts/run_ruler.sh --gpus 0,1 --method full --num_samples 10
+#   bash scripts/run_ruler.sh --model /path/to/model --gpus 0 --tasks niah_single_1 --datalens 65536
 #
 ################################################################################
 
@@ -68,6 +69,10 @@ DATA_SAMPLES=200  # number of samples to generate in RULER data
 # ─── Parse Arguments ────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --model)         MODELS=("$2");       shift 2 ;;
+        --models)        IFS=',' read -ra MODELS <<< "$2"; shift 2 ;;
+        --datalens)      IFS=',' read -ra DATALENS <<< "$2"; shift 2 ;;
+        --tasks)         IFS=',' read -ra TASKS <<< "$2"; shift 2 ;;
         --gpus)          GPUS="$2";           shift 2 ;;
         --method)        METHOD="$2";         shift 2 ;;
         --num_samples)   NUM_SAMPLES="$2";    shift 2 ;;

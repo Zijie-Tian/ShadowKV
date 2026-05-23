@@ -12,7 +12,7 @@ ShadowKV 是一个无需训练的高吞吐量长上下文 LLM 推理框架。核
 
 | 文件 | 作用 |
 |------|------|
-| `models/kv_cache.py` | KV_Cache、ShadowKVCache、ShadowKVCache_CPU 实现 |
+| `models/kv_cache.py` | KV_Cache、ShadowKVCache 实现 |
 | `models/base.py` | LLM 基类，管理 inference()、prefill()、generate() |
 | `models/tensor_op.py` | CUDA kernel 绑定（RoPE、batch_gather_gemm） |
 | `kernels/batch_gather_gemm.cu` | CUTLASS GEMM kernel，重建 K cache |

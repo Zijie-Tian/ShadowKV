@@ -79,6 +79,11 @@ def parse_args() -> Namespace:
     p.add_argument("--rank", type=int, default=160)
     p.add_argument("--chunk_size", type=int, default=8)
     p.add_argument("--minference", action='store_true', default=False)
+    p.add_argument("--longbench_e", action='store_true', default=False)
+    p.add_argument("--longbench_max_gen", type=int, default=None,
+                   help="Override LongBench task max generation length for smoke/debug runs.")
+    p.add_argument("--longbench_output_dir", type=str, default=None,
+                   help="Directory for LongBench <task>.jsonl prediction files.")
 
     return p.parse_args()
 
@@ -95,12 +100,15 @@ if __name__ == '__main__':
     rank = args.rank
     chunk_size = args.chunk_size
     minference = args.minference
+    longbench_e = args.longbench_e
+    longbench_max_gen = args.longbench_max_gen
+    longbench_output_dir = args.longbench_output_dir
 
     dist_config = init_dist()
     
     from evaluator import Evaluator
     from models import choose_model_class
-    from data.dataset import Dataset
+    from data.dataset import Dataset, is_longbench_name
     
     evaluator = Evaluator(dist_config)
     
@@ -115,8 +123,26 @@ if __name__ == '__main__':
         llm.print_kv_stats()
 
     for dataset_name in dataset_names:
-        dataset = Dataset(dataset_name, llm.tokenizer, datalen, num_samples, evaluator.dist_config.rank, evaluator.dist_config.world_size)
-        evaluator.test(llm, dataset, f"archive/{model_name.split('/')[-1]}/{dataset_name}_{datalen}_{args.method}_{sparse_budget}_{rank}_{chunk_size}.jsonl", args.method)
+        dataset = Dataset(
+            dataset_name,
+            llm.tokenizer,
+            datalen,
+            num_samples,
+            evaluator.dist_config.rank,
+            evaluator.dist_config.world_size,
+            longbench_e=longbench_e,
+            longbench_max_gen=longbench_max_gen,
+        )
+        if is_longbench_name(dataset_name):
+            output_dir = longbench_output_dir or os.path.join(
+                "archive",
+                model_name.split('/')[-1],
+                "long_bench_e" if longbench_e else "long_bench",
+            )
+            output_path = os.path.join(output_dir, f"{dataset.longbench_task()}.jsonl")
+        else:
+            output_path = f"archive/{model_name.split('/')[-1]}/{dataset_name}_{datalen}_{args.method}_{sparse_budget}_{rank}_{chunk_size}.jsonl"
+        evaluator.test(llm, dataset, output_path, args.method)
     
     del llm
     gc.collect()

@@ -26,7 +26,7 @@ import pandas as pd
 import json
 import datetime
 
-from data.dataset import Dataset
+from data.dataset import Dataset, is_longbench_name
 from models.base import LLM
 
 
@@ -76,10 +76,24 @@ class Evaluator:
                     # print(pred, gts, dataset.metric(pred, gts))
                     scores.append(dataset.metric(pred, gts))
                 
-            elif 'long_bench' in dataset.dataset_name:
+            elif is_longbench_name(dataset.dataset_name):
                 rets = llm.generate(prompt.to(llm.device), gen_len=dataset.gen_len, verbose=False, top_p=1.0, temperature=0.0)
-                for (pred, gt, classes) in zip(rets, dataset.gt[i*bsz:(i+1)*bsz], dataset.classes[i*bsz:(i+1)*bsz]):
-                    scores.append(max([dataset.metric(pred, g, classes) for g in gt]))
+                longbench_rows = []
+                for (pred, gt, classes, length) in zip(
+                    rets,
+                    dataset.gt[i*bsz:(i+1)*bsz],
+                    dataset.classes[i*bsz:(i+1)*bsz],
+                    dataset.lengths[i*bsz:(i+1)*bsz],
+                ):
+                    sample_score = dataset.longbench_metric(pred, gt, classes)
+                    scores.append(sample_score)
+                    longbench_rows.append({
+                        "pred": pred,
+                        "answers": gt,
+                        "all_classes": classes,
+                        "length": length,
+                        "score": sample_score,
+                    })
 
             else:
                 rets = llm.generate(prompt.to(llm.device), gen_len=dataset.gen_len, verbose=False, top_p=1.0, temperature=0.0)
@@ -110,6 +124,8 @@ class Evaluator:
                         "correct": scores,
                         "avg_score": avg_score,
                     }
+            elif is_longbench_name(dataset.dataset_name):
+                preds = longbench_rows
             else:
                 preds = {
                         "prediction": rets,
@@ -119,7 +135,11 @@ class Evaluator:
                     }
 
             with open(output_path, "a", encoding="utf8") as fout:
-                fout.write(json.dumps(preds, ensure_ascii=False) + "\n")
+                if isinstance(preds, list):
+                    for row in preds:
+                        fout.write(json.dumps(row, ensure_ascii=False) + "\n")
+                else:
+                    fout.write(json.dumps(preds, ensure_ascii=False) + "\n")
             # if self.dist_config.is_distributed:
             #     dist.barrier()
 

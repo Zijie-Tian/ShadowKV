@@ -178,7 +178,7 @@ if __name__ == '__main__':
     min_prompt_len = configs[model_name][length]["min_prompt_len"]
     temperature = 0.6
     baseline_bsz = configs[model_name][length]["baseline_bsz"]
-    shadowkv_bsz = configs[model_name][length]["shadowkv_bsz"]
+    shadowkv_bsz = 1  # The CPU offload cache path was removed; ShadowKVCache supports batch_size=1 only
     sparse_budget = configs[model_name][length]["sparse_budget"]
 
 
@@ -212,7 +212,7 @@ if __name__ == '__main__':
 
     ##################### ShadowKV #####################
     LLM = choose_model_class(model_name)
-    llm = LLM(model_name=model_path, device='cuda:0',  batch_size=shadowkv_bsz, max_length=min_prompt_len, attn_mode='shadowkv_cpu', sparse_budget=sparse_budget)
+    llm = LLM(model_name=model_path, device='cuda:0',  batch_size=shadowkv_bsz, max_length=min_prompt_len, attn_mode='shadowkv', sparse_budget=sparse_budget)
     dataset = Dataset(dataset_name, llm.tokenizer, ruler_len, 100)
 
     input_ids_list = [dataset[i][0] for i in range(llm.batch_size)]

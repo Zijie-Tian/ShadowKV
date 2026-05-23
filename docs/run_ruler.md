@@ -55,8 +55,11 @@ TASKS=(
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--model` | 模型路径（HuggingFace 格式） | `/home/zijie/models/Llama-3.1-8B-Instruct` |
+| `--models` | 多模型路径，逗号分隔 | 脚本内 `MODELS` 数组 |
+| `--datalens` | 上下文长度，逗号分隔 | 脚本内 `DATALENS` 数组 |
+| `--tasks` | RULER 任务名，逗号分隔（不带 `ruler/` 前缀） | 脚本内 `TASKS` 数组 |
 | `--gpus` | 使用的 GPU 编号，逗号分隔 | `0,1` |
-| `--method` | 注意力方式：`full` / `shadowkv` / `shadowkv_cpu` | `full` |
+| `--method` | 注意力方式：`full` / `shadowkv` | `full` |
 | `--num_samples` | 每任务测试样本数 | `10` |
 | `--sparse_budget` | ShadowKV 稀疏预算 | `2048` |
 | `--rank` | SVD 低秩分解秩 | `160` |
@@ -140,6 +143,12 @@ bash scripts/run_ruler.sh --method shadowkv --sparse_budget 2048 --gpus 0,1
 
 # 快速冒烟测试（编辑脚本只保留一个 datalen 和少量 tasks）
 bash scripts/run_ruler.sh --gpus 0 --num_samples 3
+
+# GPU0 单模型/单任务/单长度冒烟测试（无需编辑脚本）
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_ruler.sh \
+  --model /home/zijie/models/Llama-3.1-8B-Instruct \
+  --gpus 0 --method full \
+  --datalens 65536 --tasks niah_single_1 --num_samples 1
 ```
 
 > [!NOTE]

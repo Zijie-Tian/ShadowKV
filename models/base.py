@@ -26,7 +26,7 @@ from tqdm import tqdm
 from flash_attn import flash_attn_with_kvcache
 
 from .tensor_op import sample_token, layer_norm, minference_prefill_kernel
-from .kv_cache import KV_Cache, ShadowKVCache, ShadowKVCache_CPU
+from .kv_cache import KV_Cache, ShadowKVCache
 
 class LLM:
 
@@ -39,8 +39,6 @@ class LLM:
             self.kv_cache = KV_Cache(config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size)
         elif self.attn_mode.lower() == 'shadowkv':
             self.kv_cache = ShadowKVCache(config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size, sparse_budget=sparse_budget, rank=rank, chunk_size=chunk_size)
-        elif self.attn_mode.lower() == 'shadowkv_cpu':
-            self.kv_cache = ShadowKVCache_CPU(config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size, sparse_budget=sparse_budget, rank=rank, chunk_size=chunk_size)
         else:
             raise ValueError(f"Invalid attention mode {self.attn_mode}")
 
@@ -124,7 +122,7 @@ class LLM:
             else:
                 hidden_states = flash_attn_with_kvcache(q=query_states.transpose(1, 2), k_cache=key_states.transpose(1, 2), v_cache=value_states.transpose(1, 2), causal=True)
 
-        elif isinstance(self.kv_cache, ShadowKVCache) or isinstance(self.kv_cache, ShadowKVCache_CPU):
+        elif isinstance(self.kv_cache, ShadowKVCache):
 
             if q_len > 1: # prefill
                 # svd unrope key and save

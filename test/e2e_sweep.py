@@ -31,10 +31,10 @@ import threading
 
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
-BATCH_SIZES = [2, 3, 4, 5, 6, 8, 12, 16, 24, 32, 48]
+BATCH_SIZES = [1]
 ALL_DATALENS = ["4k", "8k", "16k", "32k", "48k", "60k", "64k", "80k", "96k", "122k", "244k", "488k"]
 DATALENS = ["16k", "32k", "48k", "64k", "80k", "96k"]
-METHODS = ["full", "shadowkv_cpu"]
+METHODS = ["full", "shadowkv"]
 
 WORKER_SCRIPT = os.path.join(root_dir, "test", "e2e_single_run.py")
 

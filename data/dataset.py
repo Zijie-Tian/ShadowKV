@@ -15,6 +15,9 @@
 #
 ################################################################################
 
+import json
+from pathlib import Path
+
 from datasets import load_dataset
 def colored(text, color):
     colors = {'red': '\033[91m', 'green': '\033[92m', 'yellow': '\033[93m', 'blue': '\033[94m', 'cyan': '\033[96m'}
@@ -24,6 +27,10 @@ import numpy as np
 
 # RULER
 from .metrics import needle_score, string_match_part, multi_number, multi_words
+from data.longbench.metrics import (
+    LONG_BENCH_LINE_TRUNCATE_TASKS,
+    dataset2metric as longbench_dataset2metric,
+)
 
 # NIAH
 from data.utils import generate_random_number, read_context_files, create_contexts, NIAH_TEMPLATE, RANDOM_NEEDLE_CITIES
@@ -50,8 +57,41 @@ DATADIR = {
     'niah': 'data/niah/data',
 }
 
+LONG_BENCH_CONFIG_DIR = Path(__file__).resolve().parent / "longbench" / "config"
+with open(LONG_BENCH_CONFIG_DIR / "dataset2prompt.json", "r", encoding="utf-8") as f:
+    LONG_BENCH_TEMPLATE = json.load(f)
+with open(LONG_BENCH_CONFIG_DIR / "dataset2maxlen.json", "r", encoding="utf-8") as f:
+    LONG_BENCH_MAX_GEN = json.load(f)
+
+LONG_BENCH_NO_CHAT_TASKS = {
+    "trec",
+    "triviaqa",
+    "samsum",
+    "lsht",
+    "lcc",
+    "repobench-p",
+}
+
+
+def is_longbench_name(dataset_name: str) -> bool:
+    return (
+        dataset_name.startswith("long_bench/")
+        or dataset_name.startswith("longbench/")
+        or dataset_name in LONG_BENCH_TEMPLATE
+    )
+
 class Dataset:
-    def __init__(self, dataset_name, tokenizer, datalen, num_samples, rank=0, world_size=1):
+    def __init__(
+        self,
+        dataset_name,
+        tokenizer,
+        datalen,
+        num_samples,
+        rank=0,
+        world_size=1,
+        longbench_e=False,
+        longbench_max_gen=None,
+    ):
         self.dataset_name = dataset_name
         self.tokenizer = tokenizer
         self.datalen = datalen
@@ -59,9 +99,13 @@ class Dataset:
         self.rank = rank
         self.world_size = world_size
         self.is_sharded = False
+        self.longbench_e = longbench_e
+        self.longbench_max_gen = longbench_max_gen
 
         if dataset_name == 'niah':
             self.tokenized_prompts, self.gt, self.ctx_len, self.depth_pct = self.get_dataset()
+        elif is_longbench_name(dataset_name):
+            self.tokenized_prompts, self.gt, self.classes, self.lengths = self.get_dataset()
         else:
             self.tokenized_prompts, self.gt = self.get_dataset()
         
@@ -86,12 +130,19 @@ class Dataset:
             shard_tokenized_prompts, shard_gt = self.tokenized_prompts[start:end], self.gt[start:end]
             self.tokenized_prompts = shard_tokenized_prompts
             self.gt = shard_gt
+            if is_longbench_name(self.dataset_name):
+                self.classes = self.classes[start:end]
+                self.lengths = self.lengths[start:end]
             self.num_samples = len(shard_tokenized_prompts)
 
         self.is_sharded = True
 
     def get_gen_len(self):
-        if 'niah' == self.dataset_name:
+        if is_longbench_name(self.dataset_name):
+            if self.longbench_max_gen is not None:
+                return self.longbench_max_gen
+            return LONG_BENCH_MAX_GEN[self.longbench_task()]
+        elif 'niah' == self.dataset_name:
             return 10
         elif 'niah' in self.dataset_name:
             return 128
@@ -112,7 +163,9 @@ class Dataset:
         return self.tokenized_prompts[idx], self.gt[idx]
 
     def get_metric(self):
-        if 'multiquery' in self.dataset_name or 'multivalue' in self.dataset_name:
+        if is_longbench_name(self.dataset_name):
+            return longbench_dataset2metric[self.longbench_task()]
+        elif 'multiquery' in self.dataset_name or 'multivalue' in self.dataset_name:
             return METRICS_FN['multi']
         elif 'niah' in self.dataset_name:
             return METRICS_FN['niah']
@@ -126,6 +179,31 @@ class Dataset:
             return METRICS_FN['qa']
         else:
             raise Exception("Metric not found")
+
+    def longbench_task(self):
+        if self.dataset_name.startswith("long_bench/") or self.dataset_name.startswith("longbench/"):
+            return self.dataset_name.split("/", 1)[1]
+        return self.dataset_name
+
+    def build_longbench_chat(self, prompt: str, task: str) -> str:
+        """Mirror Quest's LongBench chat wrapping where it applies.
+
+        Quest does not add a Llama-3-specific wrapper, which is the path used by
+        the local ShadowKV smoke tests. Keep this intentionally conservative to
+        avoid introducing new prompt dependencies such as fastchat.
+        """
+        model_name = self.tokenizer.name_or_path.lower()
+        if task in LONG_BENCH_NO_CHAT_TASKS:
+            return prompt
+        if "llama-2" in model_name:
+            return f"[INST]{prompt}[/INST]"
+        return prompt
+
+    def longbench_metric(self, prediction: str, ground_truths, all_classes):
+        task = self.longbench_task()
+        if task in LONG_BENCH_LINE_TRUNCATE_TASKS:
+            prediction = prediction.lstrip("\n").split("\n")[0]
+        return max(self.metric(prediction, gt, all_classes=all_classes) for gt in ground_truths)
 
     def get_dataset(self):
         if 'ruler' in self.dataset_name: # ruler/xxx
@@ -244,6 +322,51 @@ class Dataset:
                     depth_pct.append(context["depth_percent"])
             
             return tokenized_prompts, gt, ctx_len, depth_pct
+
+        elif is_longbench_name(self.dataset_name):
+            task = self.longbench_task()
+            if task not in LONG_BENCH_TEMPLATE:
+                raise ValueError(f"LongBench task {task} not found")
+
+            hf_task = f"{task}_e" if self.longbench_e else task
+            dataset = load_dataset("THUDM/LongBench", hf_task, split="test")
+            if self.num_samples > 0:
+                self.num_samples = min(self.num_samples, len(dataset))
+            else:
+                self.num_samples = len(dataset)
+
+            prompt_format = LONG_BENCH_TEMPLATE[task]
+            tokenized_prompts = []
+            gt = []
+            classes = []
+            lengths = []
+
+            for i in range(self.num_samples):
+                sample = dataset[i]
+                prompt = prompt_format.format(**sample)
+                tokenized_prompt = self.tokenizer(
+                    prompt, truncation=False, return_tensors="pt"
+                ).input_ids[0]
+
+                if len(tokenized_prompt) > self.datalen:
+                    half = int(self.datalen / 2)
+                    prompt = self.tokenizer.decode(
+                        tokenized_prompt[:half], skip_special_tokens=True
+                    ) + self.tokenizer.decode(
+                        tokenized_prompt[-half:], skip_special_tokens=True
+                    )
+
+                prompt = self.build_longbench_chat(prompt, task)
+                input_ids = self.tokenizer(
+                    prompt, truncation=False, return_tensors="pt"
+                ).input_ids
+
+                tokenized_prompts.append(input_ids)
+                gt.append(sample["answers"])
+                classes.append(sample.get("all_classes") or [])
+                lengths.append(sample.get("length", input_ids.shape[-1]))
+
+            return tokenized_prompts, gt, classes, lengths
 
         else:
             raise ValueError(f"Dataset {self.dataset_name} not found, please choose in ruler, persona, infini_bench, needle, niah, long_bench")

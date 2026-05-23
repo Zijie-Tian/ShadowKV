@@ -48,8 +48,8 @@
 | `--model_name` | 必选 | 模型名（用于 `choose_model_class`） |
 | `--model_path` | 同 model_name | 本地模型权重路径 |
 | `--devices` | `cuda:0` | GPU 列表（空格分隔） |
-| `--methods` | `full shadowkv_cpu` | 测试方法 |
-| `--batch_sizes` | `2 3 4 5 6 8 12 16 24 32 48` | Batch size 列表 |
+| `--methods` | `full shadowkv` | 测试方法；`shadowkv` 仅支持 batch_size=1（CPU offload cache 路径已移除） |
+| `--batch_sizes` | `1` | Batch size 列表；`shadowkv` 路径仅支持 1 |
 | `--gen_len` | `100` | 生成 token 数 |
 | `--timeout` | `1800` | 单次测试超时（秒） |
 | `--output_dir` | `results/` | CSV 输出目录 |
@@ -65,7 +65,7 @@ source ~/anaconda3/etc/profile.d/conda.sh && conda activate shadowkv
 python test/e2e_sweep.py \
   --model_name "/home/zijie/models/Llama-3.1-8B-Instruct" \
   --devices cuda:0 cuda:1 \
-  --datalens 4k --batch_sizes 2 3
+  --datalens 4k --batch_sizes 1
 
 # 中等规模测试（16k-96k）
 python test/e2e_sweep.py \
