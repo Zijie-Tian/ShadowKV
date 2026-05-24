@@ -107,6 +107,14 @@ def load_jsonl(path: Path):
     return rows
 
 
+def sort_result_scores(scores: dict) -> dict:
+    """Return result.json scores ordered by subtask name, with mean last."""
+    sorted_scores = {key: scores[key] for key in sorted(k for k in scores if k != "mean")}
+    if "mean" in scores:
+        sorted_scores["mean"] = scores["mean"]
+    return sorted_scores
+
+
 def main():
     args = parse_args()
     pred_dir = resolve_pred_dir(args)
@@ -136,6 +144,8 @@ def main():
     numeric_scores = [v for v in scores.values() if isinstance(v, (int, float))]
     if numeric_scores:
         scores["mean"] = round(mean(numeric_scores), 2)
+
+    scores = sort_result_scores(scores)
 
     out_path = pred_dir / "result.json"
     with out_path.open("w", encoding="utf-8") as f:
