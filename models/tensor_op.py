@@ -156,14 +156,15 @@ def apply_rotary_pos_emb_cuda(x, cos_sin, position_ids):
     
     output = torch.empty_like(x)
 
-    shadowkv.apply_rotary_pos_emb_new(
-        x, cos_sin, position_ids, output,
-        int(batch_size), int(heads), int(seq_len), int(embed_dim),
-        int(x.stride(0)), int(x.stride(1)), int(x.stride(2)), int(x.stride(3)),
-        int(cos_sin.stride(0)),
-        int(position_ids.stride(0)), int(position_ids.stride(1)), int(position_ids.stride(2)),
-        int(half_dim)
-    )
+    with torch.cuda.device(x.device):
+        shadowkv.apply_rotary_pos_emb_new(
+            x, cos_sin, position_ids, output,
+            int(batch_size), int(heads), int(seq_len), int(embed_dim),
+            int(x.stride(0)), int(x.stride(1)), int(x.stride(2)), int(x.stride(3)),
+            int(cos_sin.stride(0)),
+            int(position_ids.stride(0)), int(position_ids.stride(1)), int(position_ids.stride(2)),
+            int(half_dim)
+        )
     
     return output
 
@@ -171,27 +172,29 @@ def apply_rotary_pos_emb_cuda_push_cache(x, cos_sin, position_ids, chunk_size, c
     batch_size, heads, seq_len, embed_dim = x.shape
     half_dim = embed_dim // 2
     if cos_sin.shape[-1] == 128:
-        shadowkv.apply_rotary_pos_emb_push_cache_opt(
-            x, cos_sin, position_ids, cache, cnts,
-            int(batch_size), int(heads), int(seq_len), int(embed_dim),
-            int(x.stride(0)), int(x.stride(1)), int(x.stride(2)), int(x.stride(3)),
-            int(cos_sin.stride(0)),
-            int(position_ids.stride(0)), int(position_ids.stride(1)), int(position_ids.stride(2)),
-            int(cache.stride(0)), int(cache.stride(1)), int(cache.stride(2)),
-            int(sparse_start), int(sparse_end),
-            int(half_dim), int(chunk_size)
-        )
+        with torch.cuda.device(x.device):
+            shadowkv.apply_rotary_pos_emb_push_cache_opt(
+                x, cos_sin, position_ids, cache, cnts,
+                int(batch_size), int(heads), int(seq_len), int(embed_dim),
+                int(x.stride(0)), int(x.stride(1)), int(x.stride(2)), int(x.stride(3)),
+                int(cos_sin.stride(0)),
+                int(position_ids.stride(0)), int(position_ids.stride(1)), int(position_ids.stride(2)),
+                int(cache.stride(0)), int(cache.stride(1)), int(cache.stride(2)),
+                int(sparse_start), int(sparse_end),
+                int(half_dim), int(chunk_size)
+            )
     elif cos_sin.shape[-1] == 64:
-        shadowkv.apply_rotary_pos_emb_push_cache_opt_glm(
-            x, cos_sin, position_ids, cache, cnts,
-            int(batch_size), int(heads), int(seq_len), int(embed_dim),
-            int(x.stride(0)), int(x.stride(1)), int(x.stride(2)), int(x.stride(3)),
-            int(cos_sin.stride(0)),
-            int(position_ids.stride(0)), int(position_ids.stride(1)), int(position_ids.stride(2)),
-            int(cache.stride(0)), int(cache.stride(1)), int(cache.stride(2)),
-            int(sparse_start), int(sparse_end),
-            int(half_dim), int(chunk_size)
-        )
+        with torch.cuda.device(x.device):
+            shadowkv.apply_rotary_pos_emb_push_cache_opt_glm(
+                x, cos_sin, position_ids, cache, cnts,
+                int(batch_size), int(heads), int(seq_len), int(embed_dim),
+                int(x.stride(0)), int(x.stride(1)), int(x.stride(2)), int(x.stride(3)),
+                int(cos_sin.stride(0)),
+                int(position_ids.stride(0)), int(position_ids.stride(1)), int(position_ids.stride(2)),
+                int(cache.stride(0)), int(cache.stride(1)), int(cache.stride(2)),
+                int(sparse_start), int(sparse_end),
+                int(half_dim), int(chunk_size)
+            )
     else:
         raise ValueError(f"Invalid cos_sin shape {cos_sin.shape}")
     
@@ -216,23 +219,24 @@ def batch_gather_gemm_rotary_pos_emb_cuda(
     sparse_budget = num_chunks * chunk_size
     position_ids = position_ids.to(torch.int32).contiguous()
     
-    shadowkv.batch_gather_gemm(
-        a.contiguous(),
-        b.contiguous(),
-        cos_sin.contiguous(),
-        cos_sin.contiguous(),
-        position_ids,
-        output,
-        batch_size,
-        heads,
-        seq_len,
-        head_dim,
-        rank,
-        sparse_budget,
-        max_seq_len,
-        chunk_size,
-        cnts,
-    )
+    with torch.cuda.device(output.device):
+        shadowkv.batch_gather_gemm(
+            a.contiguous(),
+            b.contiguous(),
+            cos_sin.contiguous(),
+            cos_sin.contiguous(),
+            position_ids,
+            output,
+            batch_size,
+            heads,
+            seq_len,
+            head_dim,
+            rank,
+            sparse_budget,
+            max_seq_len,
+            chunk_size,
+            cnts,
+        )
 
     return apply_rotary_pos_emb_cuda_push_cache(output, cos_sin, position_ids, chunk_size, cache, sparse_start, sparse_end, cnts)
 

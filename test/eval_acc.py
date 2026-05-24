@@ -84,6 +84,8 @@ def parse_args() -> Namespace:
                    help="Override LongBench task max generation length for smoke/debug runs.")
     p.add_argument("--longbench_output_dir", type=str, default=None,
                    help="Directory for LongBench <task>.jsonl prediction files.")
+    p.add_argument("--pp_size", type=int, default=1,
+                   help="Number of visible GPUs to use for GLM/Llama layer-sharded pipeline/model parallel inference.")
 
     return p.parse_args()
 
@@ -103,6 +105,7 @@ if __name__ == '__main__':
     longbench_e = args.longbench_e
     longbench_max_gen = args.longbench_max_gen
     longbench_output_dir = args.longbench_output_dir
+    pp_size = args.pp_size
 
     dist_config = init_dist()
     
@@ -117,7 +120,27 @@ if __name__ == '__main__':
     
     LLM = choose_model_class(model_name)
 
-    llm = LLM(model_name=model_name, batch_size=batch_size, device=dist_config.device, max_length=datalen+2048, attn_mode=args.method, dtype=dtype, sparse_budget=sparse_budget, rank=rank, chunk_size=chunk_size, minference=minference)
+    model_kwargs = dict(
+        model_name=model_name,
+        batch_size=batch_size,
+        device=dist_config.device,
+        max_length=datalen+2048,
+        attn_mode=args.method,
+        dtype=dtype,
+        sparse_budget=sparse_budget,
+        rank=rank,
+        chunk_size=chunk_size,
+        minference=minference,
+    )
+    pp_supported_models = {"GLM", "Llama"}
+    if pp_size != 1:
+        if LLM.__name__ not in pp_supported_models:
+            raise NotImplementedError("--pp_size is currently implemented for GLM/Llama only")
+        model_kwargs["pp_size"] = pp_size
+    elif LLM.__name__ in pp_supported_models:
+        model_kwargs["pp_size"] = pp_size
+
+    llm = LLM(**model_kwargs)
 
     if dist_config.master_process:
         llm.print_kv_stats()

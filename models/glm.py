@@ -96,12 +96,20 @@ class GLM(LLM):
         sparse_budget: int = 2048,
         rank=160,
         chunk_size=8,
-        minference=False) -> None:
+        minference=False,
+        pp_size: int = 1) -> None:
         
         self.batch_size = batch_size
         self.device = device
         self.dtype = dtype
         self.model_name = model_name
+        self.pp_size = int(pp_size)
+        if self.pp_size < 1:
+            raise ValueError(f"pp_size must be >= 1, got {pp_size}")
+        if self.pp_size > torch.cuda.device_count():
+            raise ValueError(f"pp_size={self.pp_size} requires at least {self.pp_size} visible CUDA devices, got {torch.cuda.device_count()}")
+        self.pp_devices = [f"cuda:{idx}" for idx in range(self.pp_size)] if self.pp_size > 1 else [device]
+        self.input_device = self.pp_devices[0]
         hf_model = AutoModel.from_pretrained(self.model_name, torch_dtype=self.dtype, trust_remote_code=True)
         self.config = hf_model.config
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, legacy=False, trust_remote_code=True)
@@ -114,6 +122,11 @@ class GLM(LLM):
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = self.config.seq_length
         self.rope_ratio = self.config.rope_ratio
+        self.layer_devices = [
+            self.pp_devices[min(layer_idx * self.pp_size // self.config.num_hidden_layers, self.pp_size - 1)]
+            for layer_idx in range(self.config.num_hidden_layers)
+        ]
+        self.output_device = self.layer_devices[-1]
 
         self.init_parameters(hf_model)
         self.attn_mode = attn_mode
@@ -127,22 +140,30 @@ class GLM(LLM):
 
         self.init_kv_cache(sparse_budget, rank, chunk_size, GLMConfig(self.config))
 
-    def _set_cos_sin_cache(self, hf_model):
-        return hf_model.transformer.rotary_pos_emb(self.max_length + 1024).to(self.device).transpose(-1, -2).contiguous().view(-1, 64)
+    def _set_cos_sin_cache(self, hf_model, device=None):
+        target_device = device or self.device
+        return hf_model.transformer.rotary_pos_emb(self.max_length + 1024).to(target_device).transpose(-1, -2).contiguous().view(-1, 64)
+
+    def _cos_sin_cache_for(self, device):
+        return self.cos_sin_cache_by_device[str(torch.device(device))]
 
     def init_parameters(self, hf_model):
-        self.embed_tokens = hf_model.transformer.embedding.word_embeddings.weight.detach().to(self.device)
-        self.lm_head = hf_model.transformer.output_layer.weight.detach().to(self.device)
-        self.norm_weight = hf_model.transformer.encoder.final_layernorm.weight.detach().to(self.device)
+        self.embed_tokens = hf_model.transformer.embedding.word_embeddings.weight.detach().to(self.input_device)
+        self.lm_head = hf_model.transformer.output_layer.weight.detach().to(self.output_device)
+        self.norm_weight = hf_model.transformer.encoder.final_layernorm.weight.detach().to(self.output_device)
         self.norm_variance_epsilon = hf_model.transformer.encoder.final_layernorm.eps
-        self.cos_sin_cache = self._set_cos_sin_cache(hf_model)
+        self.cos_sin_cache_by_device = {
+            dev: self._set_cos_sin_cache(hf_model, dev)
+            for dev in sorted(set(self.layer_devices))
+        }
+        self.cos_sin_cache = self.cos_sin_cache_by_device[str(torch.device(self.input_device))]
 
         self.layers :list[GLMLayer] = []
 
         for idx, hf_layer in enumerate(hf_model.transformer.encoder.layers):
             layer = GLMLayer(idx)
             layer.init_parameters(hf_layer=hf_layer)
-            layer.init_gpu(self.device)
+            layer.init_gpu(self.layer_devices[idx])
             self.layers.append(layer)
             hf_model.transformer.encoder.layers[idx] = None
             gc.collect()
@@ -196,7 +217,7 @@ class GLM(LLM):
 
     @torch.inference_mode()
     def apply_rotary_pos_emb(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
-        vllm._custom_ops.rotary_embedding(position_ids, q, k, 128, self.cos_sin_cache, False)
+        vllm._custom_ops.rotary_embedding(position_ids, q, k, 128, self._cos_sin_cache_for(q.device), False)
         bsz = q.shape[0]
         q = q.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(bsz, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -211,7 +232,7 @@ class GLM(LLM):
             position_ids = position_ids.unsqueeze(0).unsqueeze(0).expand(x.size(0), x.size(1), -1)
         if len(position_ids.shape) == 2: # position_ids: [bsz, seq]
             position_ids = position_ids.unsqueeze(1).expand(-1, x.size(1), -1)
-        rope_cache = self.cos_sin_cache[position_ids] # [max_len, 64] --> [bsz, heads, seq, 64]
+        rope_cache = self._cos_sin_cache_for(x.device)[position_ids] # [max_len, 64] --> [bsz, heads, seq, 64]
         rot_dim = 64
         x, x_pass = x[..., :rot_dim], x[..., rot_dim:]
 

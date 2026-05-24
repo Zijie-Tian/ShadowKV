@@ -27,12 +27,16 @@ class KV_Cache:
         batch_size :int = 1,
         max_length :int = 32*1024, 
         device :str = 'cuda:0',
-        dtype = torch.bfloat16) -> None:
+        dtype = torch.bfloat16,
+        layer_devices=None) -> None:
 
         self.config = config
         self.max_length = max_length
         self.device = device
         self.dtype = dtype
+        self.num_layers = config.num_hidden_layers
+        self.layer_devices = [str(torch.device(d)) for d in (layer_devices or [device] * self.num_layers)]
+        self.multi_device = len(set(self.layer_devices)) > 1
         self.k_cache = torch.zeros(
             config.num_hidden_layers,
             batch_size,
@@ -52,7 +56,6 @@ class KV_Cache:
             device='cpu',
             dtype=self.dtype
         )
-        self.num_layers = config.num_hidden_layers
         self.kv_offset = 0
 
         # batch prefill record
@@ -76,21 +79,26 @@ class KV_Cache:
         key = self.k_cache[layer_idx][self.prefilled_batch:self.prefilled_batch + bsz, :, :self.kv_offset + incoming]
         value = self.v_cache[layer_idx][self.prefilled_batch:self.prefilled_batch + bsz, :, :self.kv_offset + incoming]
 
+        layer_device = self.layer_devices[layer_idx]
         if incoming > 1: # prefill
-            key = key.to(self.device)
-            value = value.to(self.device)
+            key = key.to(layer_device)
+            value = value.to(layer_device)
 
         if layer_idx == self.num_layers - 1:
             self.prefilled_batch += bsz
             if self.prefilled_batch == self.batch_size:
                 self.kv_offset += incoming
         
-        return key.to(self.device), value.to(self.device)
+        return key.to(layer_device), value.to(layer_device)
     
     def print_stats(self):
         print(f"KVCache | max_length {self.max_length} | dtype {self.dtype} | cached {self.kv_offset}")
 
     def H2D(self):
+        if self.multi_device:
+            # Keep full-attention KV on CPU in PP mode and move each layer slice
+            # on demand. Moving the full cache to one GPU would defeat sharding.
+            return
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
@@ -115,6 +123,7 @@ class ShadowKVCache:
         sparse_budget: int = 2048,
         chunk_size=8,
         rank=160,
+        layer_devices=None,
         ) -> None:
         
         self.config = config
@@ -126,6 +135,9 @@ class ShadowKVCache:
         self.head_dim = config.hidden_size // config.num_attention_heads
         self.num_attention_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
+        self.num_layers = config.num_hidden_layers
+        self.layer_devices = [str(torch.device(d)) for d in (layer_devices or [device] * self.num_layers)]
+        self.multi_device = len(set(self.layer_devices)) > 1
 
         self.sparse_budget = int(sparse_budget)
         self.chunk_size = chunk_size
@@ -139,47 +151,63 @@ class ShadowKVCache:
 
         assert self.batch_size == 1, "ShadowKV class only supports batch_size=1, please use ShadowKV_CPU class for batch_size > 1"
 
-        self.selected_chunk_idx = torch.zeros(
-            config.num_hidden_layers,
-            batch_size,
-            config.num_key_value_heads,
-            self.select_sets,
-            device=self.device,
-            dtype=torch.long
-        )
+        if self.multi_device:
+            self.selected_chunk_idx = [
+                torch.zeros(batch_size, config.num_key_value_heads, self.select_sets, device=dev, dtype=torch.long)
+                for dev in self.layer_devices
+            ]
+            self.v_cache_cpu = [
+                torch.zeros(batch_size, config.num_key_value_heads, self.max_length, self.head_dim, device=dev, dtype=self.dtype)
+                for dev in self.layer_devices
+            ]
+            self.k_cache_buffer = [
+                torch.zeros(batch_size, config.num_key_value_heads, self.sparse_budget + 4096, self.head_dim, device=dev, dtype=self.dtype)
+                for dev in self.layer_devices
+            ]
+            self.v_cache_buffer = [
+                torch.zeros(batch_size, config.num_key_value_heads, self.sparse_budget + 4096, self.head_dim, device=dev, dtype=self.dtype)
+                for dev in self.layer_devices
+            ]
+        else:
+            self.selected_chunk_idx = torch.zeros(
+                config.num_hidden_layers,
+                batch_size,
+                config.num_key_value_heads,
+                self.select_sets,
+                device=self.device,
+                dtype=torch.long
+            )
 
-        self.v_cache_cpu = torch.zeros(
-            config.num_hidden_layers,
-            batch_size,
-            config.num_key_value_heads,
-            self.max_length,
-            self.config.hidden_size // self.config.num_attention_heads,
-            device=self.device,
-            dtype=self.dtype
-        )
+            self.v_cache_cpu = torch.zeros(
+                config.num_hidden_layers,
+                batch_size,
+                config.num_key_value_heads,
+                self.max_length,
+                self.config.hidden_size // self.config.num_attention_heads,
+                device=self.device,
+                dtype=self.dtype
+            )
 
-        self.k_cache_buffer = torch.zeros(
-            config.num_hidden_layers,
-            batch_size,
-            config.num_key_value_heads,
-            self.sparse_budget + 4096,
-            self.config.hidden_size // self.config.num_attention_heads,
-            device=self.device,
-            dtype=self.dtype
-        )
+            self.k_cache_buffer = torch.zeros(
+                config.num_hidden_layers,
+                batch_size,
+                config.num_key_value_heads,
+                self.sparse_budget + 4096,
+                self.config.hidden_size // self.config.num_attention_heads,
+                device=self.device,
+                dtype=self.dtype
+            )
 
-        self.v_cache_buffer = torch.zeros(
-            config.num_hidden_layers,
-            batch_size,
-            config.num_key_value_heads,
-            self.sparse_budget + 4096,
-            self.config.hidden_size // self.config.num_attention_heads,
-            device=self.device,
-            dtype=self.dtype
-        )
+            self.v_cache_buffer = torch.zeros(
+                config.num_hidden_layers,
+                batch_size,
+                config.num_key_value_heads,
+                self.sparse_budget + 4096,
+                self.config.hidden_size // self.config.num_attention_heads,
+                device=self.device,
+                dtype=self.dtype
+            )
 
-
-        self.num_layers = config.num_hidden_layers
         self.kv_offset = 0
         self.prefill = 0
         self.gen_offset = 0
@@ -189,7 +217,24 @@ class ShadowKVCache:
         self.U = None
         self.SV = None
 
-        self.copy_stream = torch.cuda.Stream()
+        self.copy_streams = {
+            dev: torch.cuda.Stream(device=torch.device(dev))
+            for dev in sorted(set(self.layer_devices))
+        }
+        self.copy_stream = self.copy_streams[self.layer_devices[0]]
+
+    def _layer(self, value, layer_idx):
+        return value[layer_idx]
+
+    def _zero_container(self, value):
+        if isinstance(value, list):
+            for item in value:
+                item.zero_()
+        else:
+            value.zero_()
+
+    def get_copy_stream(self, layer_idx):
+        return self.copy_streams[self.layer_devices[layer_idx]]
 
     def print_stats(self):
         print(f"ShadowKV | sparse budget {self.sparse_budget} | chunk size {self.chunk_size} |rank {self.rank} | cached {self.kv_offset} | local_chunk {self.local_chunk} | outlier_chunk {self.outlier_chunk}")
@@ -205,24 +250,44 @@ class ShadowKVCache:
         
         if layer_idx == 0:
             # init U, SV
-            self.U = torch.zeros(self.num_layers, self.batch_size, k_cache.shape[1], self.rank, device=self.device, dtype=self.dtype)
-            self.SV = torch.zeros(self.num_layers, self.batch_size, self.num_key_value_heads, self.rank, self.head_dim, device=self.device, dtype=self.dtype)
+            if self.multi_device:
+                self.U = [
+                    torch.zeros(self.batch_size, k_cache.shape[1], self.rank, device=dev, dtype=self.dtype)
+                    for dev in self.layer_devices
+                ]
+                self.SV = [
+                    torch.zeros(self.batch_size, self.num_key_value_heads, self.rank, self.head_dim, device=dev, dtype=self.dtype)
+                    for dev in self.layer_devices
+                ]
+            else:
+                self.U = torch.zeros(self.num_layers, self.batch_size, k_cache.shape[1], self.rank, device=self.device, dtype=self.dtype)
+                self.SV = torch.zeros(self.num_layers, self.batch_size, self.num_key_value_heads, self.rank, self.head_dim, device=self.device, dtype=self.dtype)
         
         u, s, v = torch.svd(k_cache.float())
         v = v.transpose(1,2)
         # [bsz, 128k, 1024] --> [bsz, 128k, 160] [bsz, 160, 1024] (bsz, 8, 160, 128)
-        self.U[layer_idx].copy_(u[:, :, :self.rank].to(self.dtype)) # [bsz, 128k, 160]
-        self.SV[layer_idx].copy_(torch.matmul(torch.diag_embed(s[:, :self.rank]), v[:, :self.rank]).to(self.dtype).view(self.batch_size, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)) # [bsz, 8, 160, 128]
+        self._layer(self.U, layer_idx).copy_(u[:, :, :self.rank].to(self.dtype)) # [bsz, 128k, 160]
+        self._layer(self.SV, layer_idx).copy_(torch.matmul(torch.diag_embed(s[:, :self.rank]), v[:, :self.rank]).to(self.dtype).view(self.batch_size, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)) # [bsz, 8, 160, 128]
     
     def register_k_landmark(self, k_landmark, k_landmark_idx, layer_idx):
         num_landmarks = k_landmark.shape[-2]
         if layer_idx == 0:
             # init k_landmark, k_landmark_idx
-            self.k_landmark = torch.zeros(self.num_layers, self.batch_size, self.num_key_value_heads, num_landmarks, self.head_dim, device=self.device, dtype=self.dtype)
-            self.k_landmark_idx = torch.zeros(self.num_layers, self.batch_size, self.num_key_value_heads, num_landmarks, device=self.device, dtype=torch.long)
+            if self.multi_device:
+                self.k_landmark = [
+                    torch.zeros(self.batch_size, self.num_key_value_heads, num_landmarks, self.head_dim, device=dev, dtype=self.dtype)
+                    for dev in self.layer_devices
+                ]
+                self.k_landmark_idx = [
+                    torch.zeros(self.batch_size, self.num_key_value_heads, num_landmarks, device=dev, dtype=torch.long)
+                    for dev in self.layer_devices
+                ]
+            else:
+                self.k_landmark = torch.zeros(self.num_layers, self.batch_size, self.num_key_value_heads, num_landmarks, self.head_dim, device=self.device, dtype=self.dtype)
+                self.k_landmark_idx = torch.zeros(self.num_layers, self.batch_size, self.num_key_value_heads, num_landmarks, device=self.device, dtype=torch.long)
         
-        self.k_landmark[layer_idx].copy_(k_landmark.contiguous())
-        self.k_landmark_idx[layer_idx].copy_(k_landmark_idx.contiguous())
+        self._layer(self.k_landmark, layer_idx).copy_(k_landmark.contiguous())
+        self._layer(self.k_landmark_idx, layer_idx).copy_(k_landmark_idx.contiguous())
 
     def prefill_kv_cache(self,
             new_v_cache :torch.Tensor,
@@ -233,7 +298,10 @@ class ShadowKVCache:
         
         incoming = new_v_cache.shape[-2] # [bsz, num_kv_heads, incoming, head_dim]
         self.prefill = incoming
-        self.v_cache_cpu[layer_idx][:, :, :incoming] = new_v_cache.clone()
+        v_cache_cpu = self._layer(self.v_cache_cpu, layer_idx)
+        k_cache_buffer = self._layer(self.k_cache_buffer, layer_idx)
+        v_cache_buffer = self._layer(self.v_cache_buffer, layer_idx)
+        v_cache_cpu[:, :, :incoming] = new_v_cache.clone()
 
         # [x0, x1, ...., self.chunks*chunk_size, local_chunk, rest]
         self.chunks = max(incoming // self.chunk_size - self.local_chunk, 0)
@@ -247,8 +315,8 @@ class ShadowKVCache:
         
         # store Post-RoPE k cache <prefill_local> to the cache
         self.prefill_local = incoming - self.chunks * self.chunk_size # local chunks + align to chunk_size
-        self.k_cache_buffer[layer_idx][:, :, :self.prefill_local].copy_(key_states_roped[:, :, -self.prefill_local:])
-        self.v_cache_buffer[layer_idx][:, :, :self.prefill_local].copy_(new_v_cache[:, :, -self.prefill_local:])
+        k_cache_buffer[:, :, :self.prefill_local].copy_(key_states_roped[:, :, -self.prefill_local:])
+        v_cache_buffer[:, :, :self.prefill_local].copy_(new_v_cache[:, :, -self.prefill_local:])
 
         if self.chunks == 0:
             self.sparse_start = self.prefill_local
@@ -284,8 +352,8 @@ class ShadowKVCache:
         self.sparse_end = self.sparse_start + self.active_sparse_budget
         
         # store outlier_chunk to the cache
-        self.k_cache_buffer[layer_idx][:, :, self.prefill_local:self.sparse_start].copy_(outlier_chunk_k_cache)
-        self.v_cache_buffer[layer_idx][:, :, self.prefill_local:self.sparse_start].copy_(outlier_chunk_v_cache)
+        k_cache_buffer[:, :, self.prefill_local:self.sparse_start].copy_(outlier_chunk_k_cache)
+        v_cache_buffer[:, :, self.prefill_local:self.sparse_start].copy_(outlier_chunk_v_cache)
 
         # filter landmark_candidates using outlier_chunk and register the rest to k_landmark
         # [bsz, kv_heads, chunks, head_dim] --> [bsz, kv_heads, chunks - outlier_chunk, head_dim]
@@ -299,14 +367,17 @@ class ShadowKVCache:
         self.register_k_landmark(landmark_candidates.gather(dim=2, index=rest_idx.unsqueeze(-1).expand(-1, -1, -1, self.head_dim)).view(self.batch_size, self.num_key_value_heads, -1, self.head_dim), rest_idx, layer_idx)
 
         if layer_idx == self.num_layers - 1:
-            assert self.sparse_end <= self.k_cache_buffer.shape[-2]
+            assert self.sparse_end <= k_cache_buffer.shape[-2]
             self.kv_offset += incoming
 
     def get_retrieval_position_ids(self, layer_idx, query_states):
         # self.k_landmark[layer_idx][:, :, :self.chunks] is [bsz, 8, chunks, head_dim]
         # chunk_attn: [bsz, 32, window_size, chunks]
         self.incoming_q_len = query_states.shape[-2] # 1
-        if self.k_landmark[layer_idx].shape[-2] == 0:
+        k_landmark = self._layer(self.k_landmark, layer_idx)
+        k_landmark_idx = self._layer(self.k_landmark_idx, layer_idx)
+        selected_chunk_idx = self._layer(self.selected_chunk_idx, layer_idx)
+        if k_landmark.shape[-2] == 0:
             return torch.empty(
                 self.batch_size,
                 self.num_key_value_heads,
@@ -328,7 +399,7 @@ class ShadowKVCache:
             torch.einsum(
                 'bhgqd,bhdc->bhgqc',
                 query_by_group,
-                self.k_landmark[layer_idx].transpose(2, 3),
+                k_landmark.transpose(2, 3),
             ).squeeze(2)
             / math.sqrt(self.head_dim)
         )
@@ -340,11 +411,11 @@ class ShadowKVCache:
         merged_results = torch.topk(chunk_attn, k=select_sets, dim=-1).indices # [bsz, 8, select_sets]
 
         # use merged_results to gather the position_ids: [bsz, 8, select_sets] --> [bsz, 8, select_sets]
-        selected_chunks = self.k_landmark_idx[layer_idx].gather(dim=-1, index=merged_results) # [bsz, 8, select_sets]
+        selected_chunks = k_landmark_idx.gather(dim=-1, index=merged_results) # [bsz, 8, select_sets]
 
         # this is chunk idx, which can be used to offload value cache and decide if the cache hits
-        self.selected_chunk_idx[layer_idx].zero_()
-        self.selected_chunk_idx[layer_idx, :, :, :select_sets].copy_(selected_chunks, non_blocking=True)
+        selected_chunk_idx.zero_()
+        selected_chunk_idx[:, :, :select_sets].copy_(selected_chunks, non_blocking=True)
 
         position_ids = (selected_chunks.unsqueeze(-1) * self.chunk_size + torch.arange(self.chunk_size, device=chunk_attn.device).unsqueeze(0).unsqueeze(0).unsqueeze(0)).view(self.batch_size, self.num_key_value_heads, -1) # [bsz, 8, select_sets * chunk_size]
 
@@ -352,16 +423,19 @@ class ShadowKVCache:
         
     def get_value_cache(self, layer_idx, position_ids):
         # gather value cache
-        value_ = self.v_cache_cpu[layer_idx].gather(dim=-2, index=position_ids.unsqueeze(-1).expand(-1, -1, -1, self.head_dim))
-        self.v_cache_buffer[layer_idx][:, :, self.sparse_start:self.sparse_end].copy_(value_, non_blocking=True)
+        v_cache_cpu = self._layer(self.v_cache_cpu, layer_idx)
+        v_cache_buffer = self._layer(self.v_cache_buffer, layer_idx)
+        value_ = v_cache_cpu.gather(dim=-2, index=position_ids.unsqueeze(-1).expand(-1, -1, -1, self.head_dim))
+        v_cache_buffer[:, :, self.sparse_start:self.sparse_end].copy_(value_, non_blocking=True)
         gen_offset = self.gen_offset if layer_idx == self.num_layers - 1 else self.gen_offset + self.incoming_q_len
 
-        return self.v_cache_buffer[layer_idx][:, :, :self.sparse_end + gen_offset]
+        return v_cache_buffer[:, :, :self.sparse_end + gen_offset]
 
     def get_key_cache(self, layer_idx, position_ids, rope_func, cos_sin_cache):
         # gather key cache and rope them
-        u = self.U[layer_idx] # [bsz, 128k, rank]
-        sv = self.SV[layer_idx] # [bsz, 8, rank, 128]
+        u = self._layer(self.U, layer_idx) # [bsz, 128k, rank]
+        sv = self._layer(self.SV, layer_idx) # [bsz, 8, rank, 128]
+        k_cache_buffer = self._layer(self.k_cache_buffer, layer_idx)
 
         # indexing, [bsz, 8, sparse_budget, rank]
         index_expanded = position_ids.unsqueeze(-1).expand(-1, -1, -1, u.size(-1)) # [bsz, 8, sparse_budget, rank]
@@ -375,10 +449,10 @@ class ShadowKVCache:
         result = rope_func(result, position_ids)
 
         # send to buffer
-        self.k_cache_buffer[layer_idx][:, :, self.sparse_start:self.sparse_end].copy_(result, non_blocking=True)
+        k_cache_buffer[:, :, self.sparse_start:self.sparse_end].copy_(result, non_blocking=True)
         gen_offset = self.gen_offset if layer_idx == self.num_layers - 1 else self.gen_offset + self.incoming_q_len
 
-        return self.k_cache_buffer[layer_idx][:, :, :self.sparse_end + gen_offset]
+        return k_cache_buffer[:, :, :self.sparse_end + gen_offset]
 
     def update_kv_cache(self, 
             new_k_cache :torch.Tensor,
@@ -387,17 +461,19 @@ class ShadowKVCache:
             ):
 
         incoming = new_k_cache.shape[-2]
-        self.v_cache_buffer[layer_idx][:, :, self.sparse_end+self.gen_offset:self.sparse_end+self.gen_offset+incoming].copy_(new_v_cache, non_blocking=True)
-        self.k_cache_buffer[layer_idx][:, :, self.sparse_end+self.gen_offset:self.sparse_end+self.gen_offset+incoming].copy_(new_k_cache, non_blocking=True)
+        v_cache_buffer = self._layer(self.v_cache_buffer, layer_idx)
+        k_cache_buffer = self._layer(self.k_cache_buffer, layer_idx)
+        v_cache_buffer[:, :, self.sparse_end+self.gen_offset:self.sparse_end+self.gen_offset+incoming].copy_(new_v_cache, non_blocking=True)
+        k_cache_buffer[:, :, self.sparse_end+self.gen_offset:self.sparse_end+self.gen_offset+incoming].copy_(new_k_cache, non_blocking=True)
 
         if layer_idx == self.num_layers - 1:
             self.kv_offset += incoming
             self.gen_offset += incoming
 
     def clear(self):
-        self.k_cache_buffer.zero_()
-        self.v_cache_buffer.zero_()
-        self.selected_chunk_idx.zero_()
+        self._zero_container(self.k_cache_buffer)
+        self._zero_container(self.v_cache_buffer)
+        self._zero_container(self.selected_chunk_idx)
         self.k_landmark = None
         self.k_landmark_idx = None
         self.U = None

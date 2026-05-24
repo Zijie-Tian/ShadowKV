@@ -35,20 +35,31 @@ class LLM:
         return f"LLM: {self.model_name}, attn_mode: {self.attn_mode}, max_length: {self.max_length}, batch_size: {self.batch_size}, device: {self.device}, dtype: {self.dtype}, GPU mem: {gpu_mem}"
 
     def init_kv_cache(self, sparse_budget: int, rank: int, chunk_size: int, config):
+        layer_devices = getattr(self, "layer_devices", None)
         if self.attn_mode == 'full':
-            self.kv_cache = KV_Cache(config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size)
+            self.kv_cache = KV_Cache(config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size, layer_devices=layer_devices)
         elif self.attn_mode.lower() == 'shadowkv':
-            self.kv_cache = ShadowKVCache(config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size, sparse_budget=sparse_budget, rank=rank, chunk_size=chunk_size)
+            self.kv_cache = ShadowKVCache(config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size, sparse_budget=sparse_budget, rank=rank, chunk_size=chunk_size, layer_devices=layer_devices)
         else:
             raise ValueError(f"Invalid attention mode {self.attn_mode}")
 
     def print_kv_stats(self):
         self.kv_cache.print_stats()
+
+    def get_input_device(self):
+        return getattr(self, "input_device", self.device)
+
+    def get_output_device(self):
+        return getattr(self, "output_device", self.device)
+
+    def get_layer_device(self, layer_idx: int):
+        return getattr(self, "layer_devices", [self.device] * self.num_layers)[layer_idx]
     
-    def get_ctx(self, input_ids: torch.LongTensor):
+    def get_ctx(self, input_ids: torch.LongTensor, device=None):
         input_len = input_ids.size(1)
         past_len = self.kv_cache.get_kv_len()
-        position_ids = torch.arange(past_len, past_len + input_len, device=self.device, dtype=torch.long).unsqueeze(0).repeat(input_ids.size(0), 1)
+        ctx_device = device if device is not None else input_ids.device
+        position_ids = torch.arange(past_len, past_len + input_len, device=ctx_device, dtype=torch.long).unsqueeze(0).repeat(input_ids.size(0), 1)
         return position_ids
 
     @torch.inference_mode()
@@ -56,11 +67,16 @@ class LLM:
             input_ids: torch.LongTensor,
             position_ids: torch.LongTensor):
 
+        input_ids = input_ids.to(self.get_input_device())
         hidden_states = F.embedding(input_ids, self.embed_tokens)
 
         for idx in range(self.num_layers):
-            hidden_states = self.layer_compute(self.layers[idx], idx, hidden_states, position_ids)
+            layer_device = self.get_layer_device(idx)
+            hidden_states = hidden_states.to(layer_device, non_blocking=True)
+            layer_position_ids = position_ids.to(layer_device, non_blocking=True)
+            hidden_states = self.layer_compute(self.layers[idx], idx, hidden_states, layer_position_ids)
         
+        hidden_states = hidden_states.to(self.get_output_device(), non_blocking=True)
         hidden_states = layer_norm(hidden_states, w=self.norm_weight, eps=self.norm_variance_epsilon)
         
         if hidden_states.shape[1] > 16: # prefill
@@ -146,8 +162,8 @@ class LLM:
                 position_ids = self.kv_cache.get_retrieval_position_ids(layer_idx=layer_idx, query_states=query_states)
 
                 # multi-stream
-                curr_stream = torch.cuda.current_stream()
-                get_value_stream = self.kv_cache.copy_stream
+                curr_stream = torch.cuda.current_stream(hidden_states.device)
+                get_value_stream = self.kv_cache.get_copy_stream(layer_idx)
 
                 with torch.cuda.stream(get_value_stream):
                     get_value_stream.wait_stream(curr_stream)

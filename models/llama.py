@@ -85,7 +85,8 @@ class Llama(LLM):
         sparse_budget: int = 2048,
         rank=160,
         chunk_size=8,
-        minference=False) -> None:
+        minference=False,
+        pp_size: int = 1) -> None:
         
         # assert batch_size == 1, "Batch size must be 1"
         self.batch_size = batch_size
@@ -94,6 +95,13 @@ class Llama(LLM):
         self.config = LlamaConfig.from_pretrained(model_name)
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, legacy=False)
+        self.pp_size = int(pp_size)
+        if self.pp_size < 1:
+            raise ValueError(f"pp_size must be >= 1, got {pp_size}")
+        if self.pp_size > torch.cuda.device_count():
+            raise ValueError(f"pp_size={self.pp_size} requires at least {self.pp_size} visible CUDA devices, got {torch.cuda.device_count()}")
+        self.pp_devices = [f"cuda:{idx}" for idx in range(self.pp_size)] if self.pp_size > 1 else [device]
+        self.input_device = self.pp_devices[0]
         self.max_length = max_length
         self.hidden_size = self.config.hidden_size
         self.num_heads = self.config.num_attention_heads
@@ -103,6 +111,11 @@ class Llama(LLM):
         self.max_position_embeddings = self.config.max_position_embeddings
         self.rope_theta = self.config.rope_theta
         self.vocab_size = self.config.vocab_size
+        self.layer_devices = [
+            self.pp_devices[min(layer_idx * self.pp_size // self.config.num_hidden_layers, self.pp_size - 1)]
+            for layer_idx in range(self.config.num_hidden_layers)
+        ]
+        self.output_device = self.layer_devices[-1]
 
         self.init_parameters()
         self.attn_mode = attn_mode
@@ -133,20 +146,25 @@ class Llama(LLM):
                 self.minference_parttern.append({int(ii): jj for ii, jj in json.load(open(MODEL2PATH[self.model_name]))[layer_idx].items()})
 
 
-    def _set_cos_sin_cache(self, inv_freq: torch.Tensor):
-        t = torch.arange(self.max_length + 1024, device=self.device, dtype=inv_freq.dtype)
+    def _set_cos_sin_cache(self, inv_freq: torch.Tensor, device=None):
+        target_device = device or self.device
+        inv_freq = inv_freq.to(target_device)
+        t = torch.arange(self.max_length + 1024, device=target_device, dtype=inv_freq.dtype)
         freqs = torch.outer(t, inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
         return emb.cos().to(self.dtype), emb.sin().to(self.dtype)
 
+    def _cos_sin_cache_for(self, device):
+        return self.cos_sin_cache_by_device[str(torch.device(device))]
+
     @torch.inference_mode()
     def apply_rotary_pos_emb_single(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
-        return apply_rotary_pos_emb_cuda(x, self.cos_sin_cache, position_ids)
+        return apply_rotary_pos_emb_cuda(x, self._cos_sin_cache_for(x.device), position_ids)
 
     @torch.inference_mode()
     def apply_rotary_pos_emb(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
         vllm._custom_ops.rotary_embedding(
-            position_ids, q, k, self.head_dim, self.cos_sin_cache, True
+            position_ids, q, k, self.head_dim, self._cos_sin_cache_for(q.device), True
         )
         bsz = q.shape[0]
         q = q.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
@@ -155,29 +173,31 @@ class Llama(LLM):
 
     def init_parameters(self):
         hf_model = LlamaForCausalLM.from_pretrained(self.model_name, torch_dtype=self.dtype)
-        self.embed_tokens = hf_model.model.embed_tokens.weight.detach().to(self.device)
-        self.lm_head = hf_model.lm_head.weight.detach().to(self.device)
-        self.norm_weight = hf_model.model.norm.weight.detach().to(self.device)
+        self.embed_tokens = hf_model.model.embed_tokens.weight.detach().to(self.input_device)
+        self.lm_head = hf_model.lm_head.weight.detach().to(self.output_device)
+        self.norm_weight = hf_model.model.norm.weight.detach().to(self.output_device)
         self.norm_variance_epsilon = hf_model.model.norm.variance_epsilon
-        try:
-            cos_cache = hf_model.model.rotary_emb.cos_cached[:self.max_length+1024].to(self.device).to(self.dtype)
-            sin_cache = hf_model.model.rotary_emb.sin_cached[:self.max_length+1024].to(self.device).to(self.dtype)
-        except:
-            cos_cache, sin_cache = self._set_cos_sin_cache(hf_model.model.rotary_emb.inv_freq.to(self.device))
         rotary_half_dim = self.head_dim // 2
-        self.cos_sin_cache = torch.cat(
-            (cos_cache[:, :rotary_half_dim], sin_cache[:, :rotary_half_dim]),
-            dim=-1,
-        )
+        self.cos_sin_cache_by_device = {}
+        for dev in sorted(set(self.layer_devices)):
+            try:
+                cos_cache = hf_model.model.rotary_emb.cos_cached[:self.max_length+1024].to(dev).to(self.dtype)
+                sin_cache = hf_model.model.rotary_emb.sin_cached[:self.max_length+1024].to(dev).to(self.dtype)
+            except:
+                cos_cache, sin_cache = self._set_cos_sin_cache(hf_model.model.rotary_emb.inv_freq, dev)
+            self.cos_sin_cache_by_device[dev] = torch.cat(
+                (cos_cache[:, :rotary_half_dim], sin_cache[:, :rotary_half_dim]),
+                dim=-1,
+            )
+            del cos_cache, sin_cache
+        self.cos_sin_cache = self.cos_sin_cache_by_device[str(torch.device(self.input_device))]
         
-        del cos_cache, sin_cache
-
         self.layers :list[LlamaLayer] = []
 
         for idx, hf_layer in enumerate(hf_model.model.layers):
             layer = LlamaLayer(idx)
             layer.init_parameters(hf_layer=hf_layer)
-            layer.init_gpu(self.device)
+            layer.init_gpu(self.layer_devices[idx])
             self.layers.append(layer)
             hf_model.model.layers[idx] = None
             gc.collect()
